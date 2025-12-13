@@ -16,6 +16,7 @@
 import { loadConfig, SUPPORTED_ASSETS } from './config.js';
 import { MomentumLagStrategy } from './strategy.js';
 import { Backtester } from './backtest.js';
+import { checkAndApproveUsdc, UsdcApprovalManager } from './clients/usdc-approval.js';
 import logger from './utils/logger.js';
 import { formatCurrency, formatPercent } from './utils/helpers.js';
 
@@ -134,8 +135,58 @@ async function runBacktest(config: ReturnType<typeof loadConfig>): Promise<void>
   console.log(`\nTrades exported to: ${exportPath}`);
 }
 
+/**
+ * Check and handle USDC approvals before trading
+ */
+async function checkUsdcApprovals(config: ReturnType<typeof loadConfig>): Promise<{ approved: boolean; balance: number }> {
+  logger.info('=== Checking USDC Approvals ===');
+
+  const autoApprove = process.argv.includes('--auto-approve') ||
+                      process.env.AUTO_APPROVE === 'true';
+
+  const { approved, balance } = await checkAndApproveUsdc(config, autoApprove);
+
+  if (!approved) {
+    logger.error('USDC approvals not in place. Cannot proceed with trading.');
+    logger.info('');
+    logger.info('To fix this, you can either:');
+    logger.info('  1. Run with --auto-approve flag: npm start -- --auto-approve');
+    logger.info('  2. Set AUTO_APPROVE=true in your .env file');
+    logger.info('  3. Manually approve USDC on Polymarket contracts via Polygonscan');
+    logger.info('');
+    logger.info('Required contract approvals:');
+    const approvalManager = new UsdcApprovalManager(config);
+    const contracts = approvalManager.getContractAddresses();
+    logger.info(`  - CTF Exchange: ${contracts.CTF_EXCHANGE}`);
+    logger.info(`  - Neg Risk CTF Exchange: ${contracts.NEG_RISK_CTF_EXCHANGE}`);
+    logger.info(`  - Neg Risk Adapter: ${contracts.NEG_RISK_ADAPTER}`);
+  }
+
+  return { approved, balance };
+}
+
 // Run live trading mode
 async function runLive(config: ReturnType<typeof loadConfig>): Promise<void> {
+  // Step 1: Check and approve USDC if needed
+  logger.info('');
+  logger.info('=== Pre-flight Checks ===');
+
+  const { approved, balance } = await checkUsdcApprovals(config);
+
+  if (!approved) {
+    process.exit(1);
+  }
+
+  logger.info(`USDC balance: ${formatCurrency(balance)}`);
+
+  if (balance < 50) {
+    logger.warn('Low USDC balance. Recommend at least $50 for trading.');
+  }
+
+  logger.info('All pre-flight checks passed!');
+  logger.info('');
+
+  // Step 2: Initialize and start strategy
   const strategy = new MomentumLagStrategy(config);
 
   // Setup graceful shutdown
@@ -188,6 +239,7 @@ Usage:
 Options:
   --backtest                   Force backtest mode
   --live                       Force live mode (requires BACKTEST=false in .env)
+  --auto-approve               Automatically approve USDC spending on Polymarket
   --start YYYY-MM-DD          Backtest start date (default: 7 days ago)
   --end YYYY-MM-DD            Backtest end date (default: now)
   --help                       Show this help message
@@ -198,6 +250,7 @@ Environment Variables:
   CHAIN_ID                     137 (Polygon) or 80002 (Amoy testnet)
   BACKTEST                     true/false - run in backtest mode
   DRY_RUN                      true/false - simulate trades without executing
+  AUTO_APPROVE                 true/false - auto-approve USDC on Polymarket contracts
   POSITION_SIZE_PCT            Position size as % of balance (e.g., 0.02 = 2%)
   GAP_THRESHOLD                Minimum gap to trigger entry (e.g., 0.03 = 3%)
   MOVE_THRESHOLD               Minimum price move (e.g., 0.02 = 2%)
@@ -211,10 +264,23 @@ Configuration:
 Documentation:
   https://docs.polymarket.com
 
-Assumptions:
-  - USDC approval: Ensure you have approved USDC spending on Polymarket
-  - Account setup: Create a Polymarket account and fund it with USDC
-  - API access: Generate API credentials or let the bot derive them
+Startup Flow:
+  1. Load configuration from .env
+  2. Check USDC balance on Polygon
+  3. Check USDC approvals for Polymarket contracts
+  4. If not approved and --auto-approve is set, approve automatically
+  5. Discover active 15-minute crypto markets via REST API
+  6. Connect to WebSocket feeds for real-time data
+  7. Start scanning for trading opportunities
+
+USDC Approval:
+  The bot needs USDC spending approved on three Polymarket contracts:
+  - CTF Exchange (main trading)
+  - Neg Risk CTF Exchange (conditional tokens)
+  - Neg Risk Adapter (market adapter)
+
+  Use --auto-approve or set AUTO_APPROVE=true to approve automatically,
+  or approve manually on Polygonscan before running.
   `);
 }
 

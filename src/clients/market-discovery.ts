@@ -1,6 +1,16 @@
 /**
  * Market Discovery Client
- * Fetches and filters active 15-minute crypto prediction markets
+ * Fetches and filters active 15-minute crypto prediction markets using Polymarket REST API
+ *
+ * API Documentation: https://docs.polymarket.com/#get-markets
+ *
+ * This client uses the CLOB API to discover markets:
+ * - GET /markets - List all markets with pagination
+ * - GET /markets/:condition_id - Get specific market details
+ * - GET /prices-history - Get historical prices for backtesting
+ *
+ * For Gamma/crypto markets, we also check:
+ * - Polymarket Gamma API for crypto-specific markets
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -10,24 +20,71 @@ import logger, { logMarket } from '../utils/logger.js';
 import { parseCryptoMarket, isMarketTradeable, retryWithBackoff } from '../utils/helpers.js';
 import { MARKET_PATTERNS } from '../config.js';
 
+// API response types
 interface MarketResponse {
   data: Market[];
   next_cursor?: string;
 }
 
+interface GammaMarket {
+  id: string;
+  question: string;
+  conditionId: string;
+  slug: string;
+  resolutionSource: string;
+  endDate: string;
+  liquidity: string;
+  volume: string;
+  outcomes: string[];
+  outcomePrices: string[];
+  clob_token_ids: string[];
+  active: boolean;
+  closed: boolean;
+  archived: boolean;
+  acceptingOrders: boolean;
+  enableOrderBook: boolean;
+}
+
+interface GammaMarketsResponse {
+  data: GammaMarket[];
+  count: number;
+}
+
 export class MarketDiscoveryClient {
   private apiClient: AxiosInstance;
+  private gammaClient: AxiosInstance;
   private activeMarkets: Map<string, CryptoMarket> = new Map();
   private refreshJob: CronJob | null = null;
   private onMarketsUpdate: ((markets: CryptoMarket[]) => void) | null = null;
+  private host: string;
+
+  // Gamma API base URL for crypto-specific markets
+  private static readonly GAMMA_API_URL = 'https://gamma-api.polymarket.com';
 
   constructor(host: string) {
+    this.host = host;
+
+    // Main CLOB API client
     this.apiClient = axios.create({
       baseURL: host,
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
       },
+    });
+
+    // Gamma API client for crypto markets
+    this.gammaClient = axios.create({
+      baseURL: MarketDiscoveryClient.GAMMA_API_URL,
+      timeout: 30000,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    logger.info('Market discovery client initialized', {
+      clobApi: host,
+      gammaApi: MarketDiscoveryClient.GAMMA_API_URL,
     });
   }
 
@@ -61,17 +118,29 @@ export class MarketDiscoveryClient {
   }
 
   /**
-   * Refresh active markets
+   * Refresh active markets from both CLOB and Gamma APIs
    */
   public async refreshMarkets(): Promise<void> {
     try {
-      logger.debug('Refreshing markets...');
+      logger.debug('Refreshing markets from APIs...');
 
-      // Fetch all active markets
-      const markets = await this.fetchAllMarkets();
+      // Fetch markets from both sources in parallel
+      const [clobMarkets, gammaMarkets] = await Promise.all([
+        this.fetchAllMarkets().catch(err => {
+          logger.warn('CLOB API fetch failed', { error: err.message });
+          return [] as Market[];
+        }),
+        this.fetchGammaMarkets().catch(err => {
+          logger.warn('Gamma API fetch failed', { error: err.message });
+          return [] as Market[];
+        }),
+      ]);
+
+      // Combine markets, preferring Gamma data for crypto markets
+      const allMarkets = this.mergeMarkets(clobMarkets, gammaMarkets);
 
       // Filter for 15-minute crypto markets
-      const cryptoMarkets = this.filterCryptoMarkets(markets);
+      const cryptoMarkets = this.filterCryptoMarkets(allMarkets);
 
       // Update active markets map
       const previousCount = this.activeMarkets.size;
@@ -83,10 +152,12 @@ export class MarketDiscoveryClient {
         }
       }
 
-      logger.info('Markets refreshed', {
-        total: markets.length,
+      logger.info('Markets refreshed from API', {
+        clobTotal: clobMarkets.length,
+        gammaTotal: gammaMarkets.length,
         cryptoMarkets: cryptoMarkets.length,
         active: this.activeMarkets.size,
+        source: 'REST API',
       });
 
       // Log new and expired markets
@@ -102,6 +173,104 @@ export class MarketDiscoveryClient {
     } catch (error) {
       logger.error('Failed to refresh markets', { error: (error as Error).message });
     }
+  }
+
+  /**
+   * Fetch crypto markets from Gamma API
+   * The Gamma API is specifically designed for crypto price markets
+   */
+  private async fetchGammaMarkets(): Promise<Market[]> {
+    const markets: Market[] = [];
+
+    // Search for crypto-related markets
+    const searchTerms = ['BTC', 'ETH', 'SOL', 'XRP', 'Bitcoin', 'Ethereum', 'Solana'];
+
+    for (const term of searchTerms) {
+      try {
+        const response = await retryWithBackoff<GammaMarketsResponse>(
+          async () => {
+            const result = await this.gammaClient.get('/markets', {
+              params: {
+                active: true,
+                closed: false,
+                limit: 100,
+                tag: 'crypto', // Filter by crypto tag if available
+              },
+            });
+            return result.data;
+          },
+          { maxRetries: 2 }
+        );
+
+        if (response.data) {
+          for (const gm of response.data) {
+            // Convert Gamma market to our Market format
+            const market = this.convertGammaMarket(gm);
+            if (market && !markets.find(m => m.conditionId === market.conditionId)) {
+              markets.push(market);
+            }
+          }
+        }
+      } catch (error) {
+        logger.debug(`Gamma search for ${term} failed`, { error: (error as Error).message });
+      }
+    }
+
+    return markets;
+  }
+
+  /**
+   * Convert Gamma market format to our Market format
+   */
+  private convertGammaMarket(gm: GammaMarket): Market | null {
+    if (!gm.conditionId || !gm.clob_token_ids || gm.clob_token_ids.length < 2) {
+      return null;
+    }
+
+    return {
+      conditionId: gm.conditionId,
+      questionId: gm.id,
+      tokens: gm.outcomes.map((outcome, idx) => ({
+        tokenId: gm.clob_token_ids[idx] || '',
+        outcome,
+        winner: false,
+        price: parseFloat(gm.outcomePrices?.[idx] || '0.5'),
+      })),
+      minIncentiveSize: '0',
+      maxIncentiveSize: '0',
+      active: gm.active && gm.acceptingOrders,
+      closed: gm.closed || gm.archived,
+      makerBase: 0,
+      takerBase: 0,
+      description: gm.question,
+      endDate: gm.endDate,
+      question: gm.question,
+      marketSlug: gm.slug,
+      fpmm: '',
+      category: 'crypto',
+      enableOrderBook: gm.enableOrderBook,
+    };
+  }
+
+  /**
+   * Merge markets from CLOB and Gamma APIs
+   */
+  private mergeMarkets(clobMarkets: Market[], gammaMarkets: Market[]): Market[] {
+    const merged = new Map<string, Market>();
+
+    // Add CLOB markets first
+    for (const market of clobMarkets) {
+      merged.set(market.conditionId, market);
+    }
+
+    // Overlay Gamma markets (may have better/more recent data)
+    for (const market of gammaMarkets) {
+      if (!merged.has(market.conditionId)) {
+        merged.set(market.conditionId, market);
+      }
+    }
+
+    return Array.from(merged.values());
   }
 
   /**
