@@ -1,0 +1,44 @@
+{
+  "name": "polymarket-momentum-bot",
+  "version": "1.0.0",
+  "description": "Production-ready trading bot exploiting momentum lags in Polymarket's 15-minute crypto prediction markets",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "backtest": "ts-node src/backtest.ts",
+    "lint": "eslint src/**/*.ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "polymarket",
+    "trading-bot",
+    "cryptocurrency",
+    "prediction-markets",
+    "momentum-trading"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@polymarket/clob-client": "^5.3.0",
+    "axios": "^1.6.0",
+    "cron": "^3.1.0",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "ethers": "^6.9.0",
+    "technicalindicators": "^3.1.0",
+    "winston": "^3.11.0",
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "@types/cron": "^2.4.0",
+    "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.0",
+    "ts-node": "^10.9.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
