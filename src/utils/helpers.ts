@@ -4,8 +4,7 @@
  */
 
 import { v4 as uuidv4 } from 'crypto';
-import type { CryptoAsset, Market, CryptoMarket, MarketDirection } from '../types/index.js';
-import { MARKET_PATTERNS } from '../config.js';
+import type { CryptoAsset, CryptoMarket, MarketDirection } from '../types/index.js';
 import logger from './logger.js';
 
 /**
@@ -143,82 +142,20 @@ export function calculatePriceGap(
 }
 
 /**
- * Parse a market to determine if it's a 15-minute crypto up/down market
- */
-export function parseCryptoMarket(market: Market): CryptoMarket | null {
-  const description = market.description?.toLowerCase() || '';
-  const question = market.question?.toLowerCase() || '';
-  const slug = market.marketSlug?.toLowerCase() || '';
-
-  const searchText = `${description} ${question} ${slug}`;
-
-  // Check for 15-minute timeframe
-  const hasTimeframe = MARKET_PATTERNS.timeframe.some(t => searchText.includes(t.toLowerCase()));
-  if (!hasTimeframe) {
-    return null;
-  }
-
-  // Check for up/down direction
-  const hasDirection = MARKET_PATTERNS.direction.some(d => searchText.includes(d.toLowerCase()));
-  if (!hasDirection) {
-    return null;
-  }
-
-  // Determine asset
-  let asset: CryptoAsset | null = null;
-  if (searchText.includes('btc') || searchText.includes('bitcoin')) {
-    asset = 'BTC';
-  } else if (searchText.includes('eth') || searchText.includes('ethereum')) {
-    asset = 'ETH';
-  } else if (searchText.includes('sol') || searchText.includes('solana')) {
-    asset = 'SOL';
-  } else if (searchText.includes('xrp')) {
-    asset = 'XRP';
-  }
-
-  if (!asset) {
-    return null;
-  }
-
-  // Determine market direction from tokens
-  let upTokenId = '';
-  let downTokenId = '';
-  let direction: MarketDirection = 'UP';
-
-  for (const token of market.tokens) {
-    const outcome = token.outcome.toLowerCase();
-    if (outcome === 'yes' || outcome.includes('up') || outcome.includes('higher')) {
-      upTokenId = token.tokenId;
-    } else if (outcome === 'no' || outcome.includes('down') || outcome.includes('lower')) {
-      downTokenId = token.tokenId;
-    }
-  }
-
-  // Parse end date
-  const expiryTime = new Date(market.endDate);
-
-  return {
-    ...market,
-    asset,
-    direction,
-    expiryTime,
-    upTokenId,
-    downTokenId,
-  };
-}
-
-/**
  * Check if a market is still tradeable (not expired, not closed)
+ * Note: Market parsing is now handled in MarketDiscoveryClient
  */
 export function isMarketTradeable(market: CryptoMarket): boolean {
-  const now = new Date();
+  const now = Date.now();
   const expiryBuffer = 60 * 1000; // 1 minute buffer before expiry
 
   return (
     market.active &&
     !market.closed &&
     market.enableOrderBook &&
-    market.expiryTime.getTime() - now.getTime() > expiryBuffer
+    market.expiryTime.getTime() - now > expiryBuffer &&
+    market.upTokenId !== '' &&
+    market.downTokenId !== ''
   );
 }
 

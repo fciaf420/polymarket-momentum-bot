@@ -1,28 +1,35 @@
 /**
  * Market Discovery Client
- * Fetches and filters active 15-minute crypto prediction markets using Polymarket REST API
+ * Fetches and filters active 15-minute crypto prediction markets using Polymarket REST APIs
  *
- * API Documentation: https://docs.polymarket.com/#get-markets
+ * API Documentation: https://docs.polymarket.com
  *
- * This client uses the CLOB API to discover markets:
- * - GET /markets - List all markets with pagination
- * - GET /markets/:condition_id - Get specific market details
- * - GET /prices-history - Get historical prices for backtesting
+ * This client uses multiple API endpoints:
+ * - CLOB API: GET /markets - List all markets with filtering
+ * - Gamma API: GET /markets - Crypto-specific markets with tags
+ * - Strapi API: GET /markets - Event-based market data
  *
- * For Gamma/crypto markets, we also check:
- * - Polymarket Gamma API for crypto-specific markets
+ * Filtering Strategy:
+ * 1. Query APIs with active=true, closed=false filters
+ * 2. Filter by tags: "crypto", "bitcoin", "ethereum", etc.
+ * 3. Filter by end_date_min/max for 15-minute windows
+ * 4. Parse market structure to identify up/down binary markets
  */
 
 import axios, { AxiosInstance } from 'axios';
 import { CronJob } from 'cron';
-import type { Market, CryptoMarket, CryptoAsset } from '../types/index.js';
+import type { Market, CryptoMarket, CryptoAsset, Token } from '../types/index.js';
 import logger, { logMarket } from '../utils/logger.js';
-import { parseCryptoMarket, isMarketTradeable, retryWithBackoff } from '../utils/helpers.js';
-import { MARKET_PATTERNS } from '../config.js';
+import { retryWithBackoff, generateId } from '../utils/helpers.js';
 
-// API response types
-interface MarketResponse {
-  data: Market[];
+// ===========================================
+// API Response Types
+// ===========================================
+
+interface ClobMarketResponse {
+  // Array of markets or wrapped in data
+  data?: Market[];
+  markets?: Market[];
   next_cursor?: string;
 }
 
@@ -30,61 +37,120 @@ interface GammaMarket {
   id: string;
   question: string;
   conditionId: string;
+  questionId: string;
   slug: string;
   resolutionSource: string;
   endDate: string;
+  startDate: string;
   liquidity: string;
   volume: string;
+  volume24hr: string;
   outcomes: string[];
   outcomePrices: string[];
-  clob_token_ids: string[];
+  clobTokenIds: string[];
   active: boolean;
   closed: boolean;
   archived: boolean;
+  new: boolean;
+  featured: boolean;
+  restricted: boolean;
   acceptingOrders: boolean;
   enableOrderBook: boolean;
+  minimum_order_size: string;
+  minimum_tick_size: string;
+  tags?: string[];
+  image?: string;
+  icon?: string;
+  description?: string;
 }
 
-interface GammaMarketsResponse {
-  data: GammaMarket[];
-  count: number;
+interface StrapiEvent {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  startDate: string;
+  endDate: string;
+  markets: StrapiMarket[];
+  tags: Array<{ id: string; slug: string; label: string }>;
 }
+
+interface StrapiMarket {
+  id: string;
+  question: string;
+  conditionId: string;
+  slug: string;
+  outcomes: string;
+  outcomePrices: string;
+  clobTokenIds: string;
+  acceptingOrders: boolean;
+  active: boolean;
+  closed: boolean;
+}
+
+// ===========================================
+// Crypto Market Detection
+// ===========================================
+
+// Keywords that indicate a 15-minute crypto binary market
+const CRYPTO_KEYWORDS = {
+  assets: {
+    BTC: ['btc', 'bitcoin'],
+    ETH: ['eth', 'ethereum'],
+    SOL: ['sol', 'solana'],
+    XRP: ['xrp', 'ripple'],
+  },
+  timeframes: ['15 min', '15min', '15-min', '15m', '15 minute', 'fifteen minute'],
+  directions: {
+    up: ['up', 'higher', 'above', 'rise', 'increase', 'yes'],
+    down: ['down', 'lower', 'below', 'fall', 'decrease', 'no'],
+  },
+  tags: ['crypto', 'cryptocurrency', 'bitcoin', 'ethereum', 'solana', 'xrp', 'price', 'minutely', '15min'],
+};
+
+// ===========================================
+// Market Discovery Client
+// ===========================================
 
 export class MarketDiscoveryClient {
-  private apiClient: AxiosInstance;
+  private clobClient: AxiosInstance;
   private gammaClient: AxiosInstance;
+  private strapiClient: AxiosInstance;
   private activeMarkets: Map<string, CryptoMarket> = new Map();
   private refreshJob: CronJob | null = null;
   private onMarketsUpdate: ((markets: CryptoMarket[]) => void) | null = null;
-  private host: string;
 
-  // Gamma API base URL for crypto-specific markets
-  private static readonly GAMMA_API_URL = 'https://gamma-api.polymarket.com';
+  // API endpoints
+  private static readonly CLOB_API = 'https://clob.polymarket.com';
+  private static readonly GAMMA_API = 'https://gamma-api.polymarket.com';
+  private static readonly STRAPI_API = 'https://strapi-matic.poly.market';
 
   constructor(host: string) {
-    this.host = host;
-
-    // Main CLOB API client
-    this.apiClient = axios.create({
-      baseURL: host,
+    // CLOB API client
+    this.clobClient = axios.create({
+      baseURL: host || MarketDiscoveryClient.CLOB_API,
       timeout: 30000,
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
     });
 
-    // Gamma API client for crypto markets
+    // Gamma API client (crypto-focused)
     this.gammaClient = axios.create({
-      baseURL: MarketDiscoveryClient.GAMMA_API_URL,
+      baseURL: MarketDiscoveryClient.GAMMA_API,
       timeout: 30000,
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
     });
 
-    logger.info('Market discovery client initialized', {
-      clobApi: host,
-      gammaApi: MarketDiscoveryClient.GAMMA_API_URL,
+    // Strapi API client (event-based)
+    this.strapiClient = axios.create({
+      baseURL: MarketDiscoveryClient.STRAPI_API,
+      timeout: 30000,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    logger.info('Market discovery initialized', {
+      clobApi: host || MarketDiscoveryClient.CLOB_API,
+      gammaApi: MarketDiscoveryClient.GAMMA_API,
+      strapiApi: MarketDiscoveryClient.STRAPI_API,
     });
   }
 
@@ -97,13 +163,13 @@ export class MarketDiscoveryClient {
     // Initial fetch
     await this.refreshMarkets();
 
-    // Start cron job for periodic refresh (every 5 minutes)
-    this.refreshJob = new CronJob('*/5 * * * *', async () => {
+    // Refresh every 2 minutes (more frequent for 15-min markets)
+    this.refreshJob = new CronJob('*/2 * * * *', async () => {
       await this.refreshMarkets();
     });
 
     this.refreshJob.start();
-    logger.info('Market discovery started with 5-minute refresh');
+    logger.info('Market discovery started - refreshing every 2 minutes');
   }
 
   /**
@@ -118,56 +184,53 @@ export class MarketDiscoveryClient {
   }
 
   /**
-   * Refresh active markets from both CLOB and Gamma APIs
+   * Refresh active markets from all API sources
    */
   public async refreshMarkets(): Promise<void> {
     try {
       logger.debug('Refreshing markets from APIs...');
 
-      // Fetch markets from both sources in parallel
-      const [clobMarkets, gammaMarkets] = await Promise.all([
-        this.fetchAllMarkets().catch(err => {
-          logger.warn('CLOB API fetch failed', { error: err.message });
-          return [] as Market[];
-        }),
-        this.fetchGammaMarkets().catch(err => {
-          logger.warn('Gamma API fetch failed', { error: err.message });
-          return [] as Market[];
-        }),
+      // Fetch from all sources in parallel
+      const results = await Promise.allSettled([
+        this.fetchFromClobApi(),
+        this.fetchFromGammaApi(),
+        this.fetchFromStrapiApi(),
       ]);
 
-      // Combine markets, preferring Gamma data for crypto markets
-      const allMarkets = this.mergeMarkets(clobMarkets, gammaMarkets);
+      // Collect all markets
+      const allMarkets: CryptoMarket[] = [];
 
-      // Filter for 15-minute crypto markets
-      const cryptoMarkets = this.filterCryptoMarkets(allMarkets);
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value) {
+          allMarkets.push(...result.value);
+        }
+      }
+
+      // Deduplicate by conditionId
+      const uniqueMarkets = this.deduplicateMarkets(allMarkets);
+
+      // Filter for tradeable markets
+      const tradeableMarkets = uniqueMarkets.filter(m => this.isMarketTradeable(m));
 
       // Update active markets map
       const previousCount = this.activeMarkets.size;
       this.activeMarkets.clear();
 
-      for (const market of cryptoMarkets) {
-        if (isMarketTradeable(market)) {
-          this.activeMarkets.set(market.conditionId, market);
-        }
+      for (const market of tradeableMarkets) {
+        this.activeMarkets.set(market.conditionId, market);
       }
 
-      logger.info('Markets refreshed from API', {
-        clobTotal: clobMarkets.length,
-        gammaTotal: gammaMarkets.length,
-        cryptoMarkets: cryptoMarkets.length,
-        active: this.activeMarkets.size,
-        source: 'REST API',
+      logger.info('Markets refreshed', {
+        sources: 'CLOB + Gamma + Strapi APIs',
+        total: allMarkets.length,
+        unique: uniqueMarkets.length,
+        tradeable: tradeableMarkets.length,
+        previousCount,
       });
 
-      // Log new and expired markets
-      if (this.activeMarkets.size !== previousCount) {
-        logger.info(`Active markets changed: ${previousCount} -> ${this.activeMarkets.size}`);
-      }
-
       // Notify callback
-      if (this.onMarketsUpdate) {
-        this.onMarketsUpdate(Array.from(this.activeMarkets.values()));
+      if (this.onMarketsUpdate && tradeableMarkets.length > 0) {
+        this.onMarketsUpdate(tradeableMarkets);
       }
 
     } catch (error) {
@@ -176,220 +239,458 @@ export class MarketDiscoveryClient {
   }
 
   /**
-   * Fetch crypto markets from Gamma API
-   * The Gamma API is specifically designed for crypto price markets
+   * Fetch markets from CLOB API with filtering
    */
-  private async fetchGammaMarkets(): Promise<Market[]> {
-    const markets: Market[] = [];
+  private async fetchFromClobApi(): Promise<CryptoMarket[]> {
+    const markets: CryptoMarket[] = [];
 
-    // Search for crypto-related markets
-    const searchTerms = ['BTC', 'ETH', 'SOL', 'XRP', 'Bitcoin', 'Ethereum', 'Solana'];
+    try {
+      // Calculate time window: markets expiring in next 5-20 minutes
+      const now = new Date();
+      const minExpiry = new Date(now.getTime() + 5 * 60 * 1000);
+      const maxExpiry = new Date(now.getTime() + 20 * 60 * 1000);
 
-    for (const term of searchTerms) {
-      try {
-        const response = await retryWithBackoff<GammaMarketsResponse>(
-          async () => {
-            const result = await this.gammaClient.get('/markets', {
-              params: {
-                active: true,
-                closed: false,
-                limit: 100,
-                tag: 'crypto', // Filter by crypto tag if available
-              },
-            });
-            return result.data;
+      // Fetch with filters
+      const response = await retryWithBackoff(async () => {
+        return this.clobClient.get('/markets', {
+          params: {
+            active: true,
+            closed: false,
+            // Some CLOB endpoints support these filters
+            end_date_min: minExpiry.toISOString(),
+            end_date_max: maxExpiry.toISOString(),
+            limit: 100,
           },
-          { maxRetries: 2 }
-        );
+        });
+      }, { maxRetries: 2 });
 
-        if (response.data) {
-          for (const gm of response.data) {
-            // Convert Gamma market to our Market format
-            const market = this.convertGammaMarket(gm);
-            if (market && !markets.find(m => m.conditionId === market.conditionId)) {
-              markets.push(market);
-            }
-          }
+      const data = response.data;
+      const rawMarkets: Market[] = data.data || data.markets || (Array.isArray(data) ? data : []);
+
+      for (const market of rawMarkets) {
+        const cryptoMarket = this.parseToCryptoMarket(market);
+        if (cryptoMarket) {
+          markets.push(cryptoMarket);
+          logMarket('discovered', `${cryptoMarket.asset} via CLOB API`, cryptoMarket.question.substring(0, 50));
         }
-      } catch (error) {
-        logger.debug(`Gamma search for ${term} failed`, { error: (error as Error).message });
       }
+
+    } catch (error) {
+      logger.debug('CLOB API fetch failed', { error: (error as Error).message });
     }
 
     return markets;
   }
 
   /**
-   * Convert Gamma market format to our Market format
+   * Fetch markets from Gamma API (crypto-focused)
    */
-  private convertGammaMarket(gm: GammaMarket): Market | null {
-    if (!gm.conditionId || !gm.clob_token_ids || gm.clob_token_ids.length < 2) {
+  private async fetchFromGammaApi(): Promise<CryptoMarket[]> {
+    const markets: CryptoMarket[] = [];
+
+    try {
+      // Gamma API supports tag-based filtering
+      const response = await retryWithBackoff(async () => {
+        return this.gammaClient.get('/markets', {
+          params: {
+            active: true,
+            closed: false,
+            archived: false,
+            limit: 200,
+            // Filter by crypto tags
+            tag: 'crypto',
+            order: 'endDate',
+            ascending: true,
+          },
+        });
+      }, { maxRetries: 2 });
+
+      const gammaMarkets: GammaMarket[] = response.data || [];
+
+      for (const gm of gammaMarkets) {
+        const cryptoMarket = this.parseGammaMarket(gm);
+        if (cryptoMarket) {
+          markets.push(cryptoMarket);
+          logMarket('discovered', `${cryptoMarket.asset} via Gamma API`, cryptoMarket.question.substring(0, 50));
+        }
+      }
+
+    } catch (error) {
+      logger.debug('Gamma API fetch failed', { error: (error as Error).message });
+    }
+
+    return markets;
+  }
+
+  /**
+   * Fetch markets from Strapi API (event-based)
+   */
+  private async fetchFromStrapiApi(): Promise<CryptoMarket[]> {
+    const markets: CryptoMarket[] = [];
+
+    try {
+      // Search for crypto-related events
+      const response = await retryWithBackoff(async () => {
+        return this.strapiClient.get('/events', {
+          params: {
+            active: true,
+            closed: false,
+            _limit: 100,
+            // Filter by tag slugs
+            'tags.slug_in': ['crypto', 'bitcoin', 'ethereum', 'cryptocurrency'],
+          },
+        });
+      }, { maxRetries: 2 });
+
+      const events: StrapiEvent[] = response.data || [];
+
+      for (const event of events) {
+        // Check if event has crypto tags
+        const hasCryptoTag = event.tags?.some(t =>
+          CRYPTO_KEYWORDS.tags.includes(t.slug?.toLowerCase())
+        );
+
+        if (!hasCryptoTag && !this.textMatchesCrypto(event.title + ' ' + event.description)) {
+          continue;
+        }
+
+        // Parse each market in the event
+        for (const sm of event.markets || []) {
+          const cryptoMarket = this.parseStrapiMarket(sm, event);
+          if (cryptoMarket) {
+            markets.push(cryptoMarket);
+            logMarket('discovered', `${cryptoMarket.asset} via Strapi API`, cryptoMarket.question.substring(0, 50));
+          }
+        }
+      }
+
+    } catch (error) {
+      logger.debug('Strapi API fetch failed', { error: (error as Error).message });
+    }
+
+    return markets;
+  }
+
+  /**
+   * Parse a CLOB market response to CryptoMarket
+   */
+  private parseToCryptoMarket(market: Market): CryptoMarket | null {
+    // Must be active with order book
+    if (!market.active || market.closed || !market.enableOrderBook) {
       return null;
     }
 
+    // Check for crypto asset and timeframe
+    const text = `${market.description || ''} ${market.question || ''} ${market.marketSlug || ''}`.toLowerCase();
+
+    const asset = this.detectAsset(text);
+    if (!asset) return null;
+
+    const has15Min = this.hasTimeframe(text);
+    if (!has15Min) return null;
+
+    // Parse tokens for up/down
+    const { upTokenId, downTokenId } = this.parseTokens(market.tokens, text);
+    if (!upTokenId || !downTokenId) return null;
+
+    // Parse expiry
+    const expiryTime = new Date(market.endDate);
+    if (!this.isValidExpiry(expiryTime)) return null;
+
+    return {
+      ...market,
+      asset,
+      direction: 'UP', // Will be determined by signal
+      expiryTime,
+      upTokenId,
+      downTokenId,
+    };
+  }
+
+  /**
+   * Parse a Gamma API market to CryptoMarket
+   */
+  private parseGammaMarket(gm: GammaMarket): CryptoMarket | null {
+    // Must be active
+    if (!gm.active || gm.closed || gm.archived || !gm.acceptingOrders) {
+      return null;
+    }
+
+    // Check for crypto asset
+    const text = `${gm.question || ''} ${gm.description || ''} ${gm.slug || ''} ${(gm.tags || []).join(' ')}`.toLowerCase();
+
+    const asset = this.detectAsset(text);
+    if (!asset) return null;
+
+    const has15Min = this.hasTimeframe(text);
+    if (!has15Min) return null;
+
+    // Parse tokens
+    const tokens: Token[] = (gm.outcomes || []).map((outcome, idx) => ({
+      tokenId: gm.clobTokenIds?.[idx] || '',
+      outcome,
+      winner: false,
+      price: parseFloat(gm.outcomePrices?.[idx] || '0.5'),
+    }));
+
+    const { upTokenId, downTokenId } = this.parseTokens(tokens, text);
+    if (!upTokenId || !downTokenId) return null;
+
+    // Parse expiry
+    const expiryTime = new Date(gm.endDate);
+    if (!this.isValidExpiry(expiryTime)) return null;
+
     return {
       conditionId: gm.conditionId,
-      questionId: gm.id,
-      tokens: gm.outcomes.map((outcome, idx) => ({
-        tokenId: gm.clob_token_ids[idx] || '',
-        outcome,
-        winner: false,
-        price: parseFloat(gm.outcomePrices?.[idx] || '0.5'),
-      })),
-      minIncentiveSize: '0',
+      questionId: gm.questionId || gm.id,
+      tokens,
+      minIncentiveSize: gm.minimum_order_size || '0',
       maxIncentiveSize: '0',
-      active: gm.active && gm.acceptingOrders,
-      closed: gm.closed || gm.archived,
+      active: gm.active,
+      closed: gm.closed,
       makerBase: 0,
       takerBase: 0,
-      description: gm.question,
+      description: gm.description || gm.question,
       endDate: gm.endDate,
       question: gm.question,
       marketSlug: gm.slug,
       fpmm: '',
       category: 'crypto',
       enableOrderBook: gm.enableOrderBook,
+      asset,
+      direction: 'UP',
+      expiryTime,
+      upTokenId,
+      downTokenId,
     };
   }
 
   /**
-   * Merge markets from CLOB and Gamma APIs
+   * Parse a Strapi market to CryptoMarket
    */
-  private mergeMarkets(clobMarkets: Market[], gammaMarkets: Market[]): Market[] {
-    const merged = new Map<string, Market>();
-
-    // Add CLOB markets first
-    for (const market of clobMarkets) {
-      merged.set(market.conditionId, market);
+  private parseStrapiMarket(sm: StrapiMarket, event: StrapiEvent): CryptoMarket | null {
+    if (!sm.active || sm.closed || !sm.acceptingOrders) {
+      return null;
     }
 
-    // Overlay Gamma markets (may have better/more recent data)
-    for (const market of gammaMarkets) {
-      if (!merged.has(market.conditionId)) {
-        merged.set(market.conditionId, market);
-      }
+    const text = `${sm.question || ''} ${event.title || ''} ${event.description || ''}`.toLowerCase();
+
+    const asset = this.detectAsset(text);
+    if (!asset) return null;
+
+    const has15Min = this.hasTimeframe(text);
+    if (!has15Min) return null;
+
+    // Parse tokens from JSON strings
+    let outcomes: string[] = [];
+    let prices: string[] = [];
+    let tokenIds: string[] = [];
+
+    try {
+      outcomes = JSON.parse(sm.outcomes || '[]');
+      prices = JSON.parse(sm.outcomePrices || '[]');
+      tokenIds = JSON.parse(sm.clobTokenIds || '[]');
+    } catch {
+      return null;
     }
 
-    return Array.from(merged.values());
+    const tokens: Token[] = outcomes.map((outcome, idx) => ({
+      tokenId: tokenIds[idx] || '',
+      outcome,
+      winner: false,
+      price: parseFloat(prices[idx] || '0.5'),
+    }));
+
+    const { upTokenId, downTokenId } = this.parseTokens(tokens, text);
+    if (!upTokenId || !downTokenId) return null;
+
+    const expiryTime = new Date(event.endDate);
+    if (!this.isValidExpiry(expiryTime)) return null;
+
+    return {
+      conditionId: sm.conditionId,
+      questionId: sm.id,
+      tokens,
+      minIncentiveSize: '0',
+      maxIncentiveSize: '0',
+      active: sm.active,
+      closed: sm.closed,
+      makerBase: 0,
+      takerBase: 0,
+      description: event.description,
+      endDate: event.endDate,
+      question: sm.question,
+      marketSlug: sm.slug,
+      fpmm: '',
+      category: 'crypto',
+      enableOrderBook: true,
+      asset,
+      direction: 'UP',
+      expiryTime,
+      upTokenId,
+      downTokenId,
+    };
   }
 
   /**
-   * Fetch all markets from the API with pagination
+   * Detect crypto asset from text
    */
-  private async fetchAllMarkets(): Promise<Market[]> {
-    const allMarkets: Market[] = [];
-    let cursor: string | undefined;
+  private detectAsset(text: string): CryptoAsset | null {
+    for (const [asset, keywords] of Object.entries(CRYPTO_KEYWORDS.assets)) {
+      if (keywords.some(k => text.includes(k))) {
+        return asset as CryptoAsset;
+      }
+    }
+    return null;
+  }
 
-    do {
-      const response = await retryWithBackoff<MarketResponse>(
-        async () => {
-          const params: Record<string, string> = {};
-          if (cursor) {
-            params.next_cursor = cursor;
+  /**
+   * Check if text contains 15-minute timeframe indicator
+   */
+  private hasTimeframe(text: string): boolean {
+    return CRYPTO_KEYWORDS.timeframes.some(t => text.includes(t));
+  }
+
+  /**
+   * Check if text matches any crypto patterns
+   */
+  private textMatchesCrypto(text: string): boolean {
+    const lower = text.toLowerCase();
+    return Object.values(CRYPTO_KEYWORDS.assets).flat().some(k => lower.includes(k));
+  }
+
+  /**
+   * Parse tokens to find up/down token IDs
+   */
+  private parseTokens(tokens: Token[], marketText: string): { upTokenId: string; downTokenId: string } {
+    let upTokenId = '';
+    let downTokenId = '';
+
+    for (const token of tokens) {
+      const outcome = token.outcome.toLowerCase();
+
+      // Check for "up" indicators
+      if (CRYPTO_KEYWORDS.directions.up.some(d => outcome.includes(d))) {
+        upTokenId = token.tokenId;
+      }
+      // Check for "down" indicators
+      else if (CRYPTO_KEYWORDS.directions.down.some(d => outcome.includes(d))) {
+        downTokenId = token.tokenId;
+      }
+    }
+
+    // If only 2 tokens and one is "Yes", treat it as binary up/down
+    if (tokens.length === 2 && (!upTokenId || !downTokenId)) {
+      // Determine from market question if "up" or "down" market
+      const isUpMarket = CRYPTO_KEYWORDS.directions.up.some(d => marketText.includes(d));
+
+      for (const token of tokens) {
+        const outcome = token.outcome.toLowerCase();
+        if (outcome === 'yes') {
+          if (isUpMarket) {
+            upTokenId = token.tokenId;
+          } else {
+            downTokenId = token.tokenId;
           }
-
-          const result = await this.apiClient.get<MarketResponse>('/markets', { params });
-          return result.data;
-        },
-        { maxRetries: 3 }
-      );
-
-      allMarkets.push(...response.data);
-      cursor = response.next_cursor;
-
-    } while (cursor);
-
-    return allMarkets;
-  }
-
-  /**
-   * Filter markets for 15-minute crypto up/down markets
-   */
-  private filterCryptoMarkets(markets: Market[]): CryptoMarket[] {
-    const cryptoMarkets: CryptoMarket[] = [];
-
-    for (const market of markets) {
-      // Skip closed or inactive markets
-      if (market.closed || !market.active) {
-        continue;
-      }
-
-      // Skip markets without order book
-      if (!market.enableOrderBook) {
-        continue;
-      }
-
-      // Try to parse as crypto market
-      const cryptoMarket = parseCryptoMarket(market);
-      if (cryptoMarket) {
-        // Check if market expires within 15-20 minutes
-        const now = Date.now();
-        const expiryTime = cryptoMarket.expiryTime.getTime();
-        const timeToExpiry = expiryTime - now;
-
-        // Only include markets that expire in 5-20 minutes
-        // (need time to enter and exit)
-        if (timeToExpiry >= 5 * 60 * 1000 && timeToExpiry <= 20 * 60 * 1000) {
-          cryptoMarkets.push(cryptoMarket);
-          logMarket('discovered', `${cryptoMarket.asset} 15m`, `expires in ${Math.floor(timeToExpiry / 60000)}m`);
+        } else if (outcome === 'no') {
+          if (isUpMarket) {
+            downTokenId = token.tokenId;
+          } else {
+            upTokenId = token.tokenId;
+          }
         }
       }
     }
 
-    return cryptoMarkets;
+    return { upTokenId, downTokenId };
   }
 
   /**
-   * Get all active markets
+   * Check if expiry time is valid (5-20 minutes from now)
    */
+  private isValidExpiry(expiryTime: Date): boolean {
+    const now = Date.now();
+    const timeToExpiry = expiryTime.getTime() - now;
+
+    // Must expire in 5-20 minutes
+    return timeToExpiry >= 5 * 60 * 1000 && timeToExpiry <= 20 * 60 * 1000;
+  }
+
+  /**
+   * Check if market is tradeable
+   */
+  private isMarketTradeable(market: CryptoMarket): boolean {
+    const now = Date.now();
+    const expiryBuffer = 60 * 1000; // 1 minute buffer
+
+    return (
+      market.active &&
+      !market.closed &&
+      market.enableOrderBook &&
+      market.expiryTime.getTime() - now > expiryBuffer &&
+      market.upTokenId !== '' &&
+      market.downTokenId !== ''
+    );
+  }
+
+  /**
+   * Deduplicate markets by conditionId
+   */
+  private deduplicateMarkets(markets: CryptoMarket[]): CryptoMarket[] {
+    const seen = new Map<string, CryptoMarket>();
+
+    for (const market of markets) {
+      const existing = seen.get(market.conditionId);
+      if (!existing) {
+        seen.set(market.conditionId, market);
+      }
+    }
+
+    return Array.from(seen.values());
+  }
+
+  // ===========================================
+  // Public Getters
+  // ===========================================
+
   public getActiveMarkets(): CryptoMarket[] {
     // Filter out expired markets
-    const now = Date.now();
     const active: CryptoMarket[] = [];
 
     for (const [conditionId, market] of this.activeMarkets) {
-      if (isMarketTradeable(market)) {
+      if (this.isMarketTradeable(market)) {
         active.push(market);
       } else {
         this.activeMarkets.delete(conditionId);
-        logMarket('expired', `${market.asset} 15m`);
+        logMarket('expired', `${market.asset}`, market.question.substring(0, 30));
       }
     }
 
     return active;
   }
 
-  /**
-   * Get markets for a specific asset
-   */
   public getMarketsForAsset(asset: CryptoAsset): CryptoMarket[] {
     return this.getActiveMarkets().filter(m => m.asset === asset);
   }
 
-  /**
-   * Get a specific market by condition ID
-   */
   public getMarket(conditionId: string): CryptoMarket | undefined {
     const market = this.activeMarkets.get(conditionId);
-    if (market && isMarketTradeable(market)) {
+    if (market && this.isMarketTradeable(market)) {
       return market;
     }
     return undefined;
   }
 
-  /**
-   * Search for markets by keyword
-   */
-  public searchMarkets(keyword: string): CryptoMarket[] {
-    const lowerKeyword = keyword.toLowerCase();
-    return this.getActiveMarkets().filter(m => {
-      const searchText = `${m.description} ${m.question} ${m.marketSlug}`.toLowerCase();
-      return searchText.includes(lowerKeyword);
-    });
+  public getMarketCountByAsset(): Record<CryptoAsset, number> {
+    const counts: Record<CryptoAsset, number> = { BTC: 0, ETH: 0, SOL: 0, XRP: 0 };
+    for (const market of this.getActiveMarkets()) {
+      counts[market.asset]++;
+    }
+    return counts;
   }
 
   /**
-   * Get historical prices for a market token
+   * Get historical prices for a market token (for backtesting)
    */
   public async getHistoricalPrices(
     tokenId: string,
@@ -397,83 +698,20 @@ export class MarketDiscoveryClient {
     endTime?: number
   ): Promise<Array<{ timestamp: number; price: number }>> {
     try {
-      const params: Record<string, unknown> = {
-        asset_id: tokenId,
-      };
+      const params: Record<string, unknown> = { asset_id: tokenId };
+      if (startTime) params.start_ts = Math.floor(startTime / 1000);
+      if (endTime) params.end_ts = Math.floor(endTime / 1000);
 
-      if (startTime) {
-        params.start_ts = Math.floor(startTime / 1000);
-      }
-      if (endTime) {
-        params.end_ts = Math.floor(endTime / 1000);
-      }
-
-      const response = await this.apiClient.get('/prices-history', { params });
+      const response = await this.clobClient.get('/prices-history', { params });
 
       return (response.data.history || []).map((p: { t: number; p: string }) => ({
         timestamp: p.t * 1000,
         price: parseFloat(p.p),
       }));
-
     } catch (error) {
-      logger.error('Failed to get historical prices', {
-        tokenId,
-        error: (error as Error).message,
-      });
+      logger.error('Failed to get historical prices', { tokenId, error: (error as Error).message });
       return [];
     }
-  }
-
-  /**
-   * Get market info with current prices
-   */
-  public async getMarketInfo(conditionId: string): Promise<{
-    market: CryptoMarket | null;
-    upPrice: number;
-    downPrice: number;
-  } | null> {
-    try {
-      const response = await this.apiClient.get(`/markets/${conditionId}`);
-      const market = parseCryptoMarket(response.data);
-
-      if (!market) {
-        return null;
-      }
-
-      const upToken = market.tokens.find(t => t.outcome.toLowerCase().includes('yes') || t.outcome.toLowerCase().includes('up'));
-      const downToken = market.tokens.find(t => t.outcome.toLowerCase().includes('no') || t.outcome.toLowerCase().includes('down'));
-
-      return {
-        market,
-        upPrice: upToken?.price || 0,
-        downPrice: downToken?.price || 0,
-      };
-
-    } catch (error) {
-      logger.error('Failed to get market info', {
-        conditionId,
-        error: (error as Error).message,
-      });
-      return null;
-    }
-  }
-
-  /**
-   * Get market count by asset
-   */
-  public getMarketCountByAsset(): Record<CryptoAsset, number> {
-    const counts: Record<CryptoAsset, number> = {
-      BTC: 0,
-      ETH: 0,
-      SOL: 0,
-      XRP: 0,
-    };
-
-    for (const market of this.getActiveMarkets()) {
-      counts[market.asset]++;
-    }
-
-    return counts;
   }
 }
 
