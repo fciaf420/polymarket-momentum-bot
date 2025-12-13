@@ -282,6 +282,13 @@ export class MomentumLagStrategy extends EventEmitter {
 
         existing.timestamp = timestamp;
         this.marketPrices.set(conditionId, existing);
+
+        // Log price updates at debug level
+        logger.debug('Price update', {
+          asset: market.asset,
+          upPrice: existing.upPrice.toFixed(2),
+          downPrice: existing.downPrice.toFixed(2),
+        });
         break;
       }
     }

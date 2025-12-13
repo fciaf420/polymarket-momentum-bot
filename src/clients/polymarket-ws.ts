@@ -7,18 +7,23 @@ import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import type {
   OrderBook,
-  OrderBookEntry,
 } from '../types/index.js';
 import logger, { logWsEvent } from '../utils/logger.js';
 import { sleep, normalizeSharePrice } from '../utils/helpers.js';
 
-// Polymarket WebSocket message types
+// Polymarket WebSocket message types (actual format from API)
 interface PolymarketWSMessage {
-  type: string;
+  type?: string;          // Only present in some messages
   channel?: string;
   market?: string;
   asset_id?: string;
   data?: unknown;
+  // Actual price update format
+  price_changes?: Array<{ asset_id: string; price: string }>;
+  // Book snapshot format
+  bids?: Array<{ price: string; size: string }>;
+  asks?: Array<{ price: string; size: string }>;
+  timestamp?: string | number;
 }
 
 interface PriceChangeMessage {
@@ -34,33 +39,6 @@ interface OrderBookSnapshot {
   asks: Array<{ price: string; size: string }>;
   timestamp: number;
   hash: string;
-}
-
-interface OrderBookDelta {
-  market: string;
-  asset_id: string;
-  bids: Array<{ price: string; size: string }>;
-  asks: Array<{ price: string; size: string }>;
-  timestamp: number;
-}
-
-interface TradeMessage {
-  asset_id: string;
-  price: string;
-  size: string;
-  side: 'buy' | 'sell';
-  timestamp: number;
-}
-
-interface UserOrderMessage {
-  id: string;
-  asset_id: string;
-  side: string;
-  size: string;
-  filled_size: string;
-  price: string;
-  status: string;
-  timestamp: number;
 }
 
 export class PolymarketWebSocketClient extends EventEmitter {
@@ -156,6 +134,10 @@ export class PolymarketWebSocketClient extends EventEmitter {
 
   /**
    * Handle incoming WebSocket messages
+   * Polymarket sends various formats:
+   * - Array of messages: [{...}, {...}]
+   * - Price updates: {"market": "...", "price_changes": [...]}
+   * - Order book: {"market": "...", "asset_id": "...", "bids": [...], "asks": [...]}
    */
   private handleMessage(data: WebSocket.Data): void {
     const dataStr = data.toString();
@@ -166,52 +148,70 @@ export class PolymarketWebSocketClient extends EventEmitter {
     }
 
     try {
-      const message = JSON.parse(dataStr) as PolymarketWSMessage;
+      const parsed = JSON.parse(dataStr);
 
+      // Handle array of messages
+      if (Array.isArray(parsed)) {
+        for (const msg of parsed) {
+          this.processMessage(msg);
+        }
+        return;
+      }
+
+      // Handle single message
+      this.processMessage(parsed as PolymarketWSMessage);
+    } catch (error) {
+      logger.error('Error parsing Polymarket message', { error: (error as Error).message });
+    }
+  }
+
+  /**
+   * Process a single Polymarket message based on its structure
+   */
+  private processMessage(message: PolymarketWSMessage): void {
+    const timestamp = typeof message.timestamp === 'string'
+      ? parseInt(message.timestamp, 10)
+      : (message.timestamp || Date.now());
+
+    // Handle price_changes format (most common for market subscriptions)
+    if (message.price_changes && Array.isArray(message.price_changes)) {
+      for (const pc of message.price_changes) {
+        const price = normalizeSharePrice(pc.price);
+        logger.debug('Price update', { assetId: pc.asset_id.substring(0, 20), price });
+        this.emit('priceChange', pc.asset_id, price, timestamp);
+      }
+      return;
+    }
+
+    // Handle order book snapshot (has bids/asks at top level)
+    if (message.bids && message.asks && message.asset_id) {
+      this.handleOrderBookSnapshot({
+        market: message.market || '',
+        asset_id: message.asset_id,
+        bids: message.bids,
+        asks: message.asks,
+        timestamp,
+        hash: '',
+      });
+      return;
+    }
+
+    // Handle legacy type-based messages
+    if (message.type) {
       switch (message.type) {
         case 'price_change':
           this.handlePriceChange(message.data as PriceChangeMessage);
           break;
-
         case 'book':
           this.handleOrderBookSnapshot(message.data as OrderBookSnapshot);
           break;
-
-        case 'book_delta':
-          this.handleOrderBookDelta(message.data as OrderBookDelta);
-          break;
-
-        case 'trade':
-          this.handleTrade(message.data as TradeMessage);
-          break;
-
-        case 'order':
-          this.handleUserOrder(message.data as UserOrderMessage);
-          break;
-
-        case 'subscribed':
-          logger.debug('Subscribed to channel', {
-            channel: message.channel,
-            market: message.market,
-          });
-          break;
-
-        case 'unsubscribed':
-          logger.debug('Unsubscribed from channel', {
-            channel: message.channel,
-            market: message.market,
-          });
-          break;
-
         case 'error':
-          logger.error('Polymarket WS error message', { data: message.data });
+          logger.error('Polymarket WS error', { data: message.data });
           break;
-
         default:
-          logger.debug('Unknown Polymarket message type', { type: message.type });
+          // Ignore other message types
+          break;
       }
-    } catch (error) {
-      logger.error('Error parsing Polymarket message', { error: (error as Error).message });
     }
   }
 
@@ -248,59 +248,6 @@ export class PolymarketWebSocketClient extends EventEmitter {
   }
 
   /**
-   * Handle order book delta (incremental update)
-   */
-  private handleOrderBookDelta(data: OrderBookDelta): void {
-    const existing = this.orderBooks.get(data.asset_id);
-    if (!existing) {
-      // Request full snapshot
-      this.subscribeToOrderBook(data.market, data.asset_id);
-      return;
-    }
-
-    // Apply delta
-    for (const bid of data.bids) {
-      this.updateOrderBookSide(existing.bids, parseFloat(bid.price), parseFloat(bid.size), 'bid');
-    }
-
-    for (const ask of data.asks) {
-      this.updateOrderBookSide(existing.asks, parseFloat(ask.price), parseFloat(ask.size), 'ask');
-    }
-
-    existing.timestamp = data.timestamp;
-    existing.totalLiquidity = this.calculateLiquidityFromBook(existing);
-
-    this.emit('orderBook', data.asset_id, existing);
-  }
-
-  /**
-   * Update order book side with delta
-   */
-  private updateOrderBookSide(
-    side: OrderBookEntry[],
-    price: number,
-    size: number,
-    type: 'bid' | 'ask'
-  ): void {
-    const index = side.findIndex(e => e.price === price);
-
-    if (size === 0) {
-      // Remove price level
-      if (index !== -1) {
-        side.splice(index, 1);
-      }
-    } else if (index !== -1) {
-      // Update existing level
-      side[index].size = size;
-    } else {
-      // Insert new level
-      side.push({ price, size });
-      // Sort: bids descending, asks ascending
-      side.sort((a, b) => type === 'bid' ? b.price - a.price : a.price - b.price);
-    }
-  }
-
-  /**
    * Calculate total liquidity from raw bid/ask arrays
    */
   private calculateLiquidity(
@@ -310,44 +257,6 @@ export class PolymarketWebSocketClient extends EventEmitter {
     const bidLiquidity = bids.reduce((sum, b) => sum + parseFloat(b.price) * parseFloat(b.size), 0);
     const askLiquidity = asks.reduce((sum, a) => sum + parseFloat(a.price) * parseFloat(a.size), 0);
     return bidLiquidity + askLiquidity;
-  }
-
-  /**
-   * Calculate liquidity from order book
-   */
-  private calculateLiquidityFromBook(book: OrderBook): number {
-    const bidLiquidity = book.bids.reduce((sum, b) => sum + b.price * b.size, 0);
-    const askLiquidity = book.asks.reduce((sum, a) => sum + a.price * a.size, 0);
-    return bidLiquidity + askLiquidity;
-  }
-
-  /**
-   * Handle trade message
-   */
-  private handleTrade(data: TradeMessage): void {
-    this.emit('trade', {
-      assetId: data.asset_id,
-      price: parseFloat(data.price),
-      size: parseFloat(data.size),
-      side: data.side,
-      timestamp: data.timestamp,
-    });
-  }
-
-  /**
-   * Handle user order update
-   */
-  private handleUserOrder(data: UserOrderMessage): void {
-    this.emit('userOrder', {
-      id: data.id,
-      assetId: data.asset_id,
-      side: data.side,
-      size: parseFloat(data.size),
-      filledSize: parseFloat(data.filled_size),
-      price: parseFloat(data.price),
-      status: data.status,
-      timestamp: data.timestamp,
-    });
   }
 
   /**
