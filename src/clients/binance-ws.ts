@@ -1,25 +1,20 @@
 /**
  * Binance WebSocket Client
  * Fallback price feed for real-time crypto prices
+ *
+ * Supports proxy connections for geo-restricted regions:
+ * - HTTP/HTTPS proxies: http://host:port, https://host:port
+ * - SOCKS proxies: socks4://host:port, socks5://user:pass@host:port
  */
 
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { CryptoAsset, PricePoint, CryptoPriceData } from '../types/index.js';
 import logger, { logWsEvent, logPrice } from '../utils/logger.js';
 import { BINANCE_SYMBOLS } from '../config.js';
 import { sleep } from '../utils/helpers.js';
-
-interface BinanceTrade {
-  e: string;      // Event type
-  E: number;      // Event time
-  s: string;      // Symbol
-  t: number;      // Trade ID
-  p: string;      // Price
-  q: string;      // Quantity
-  T: number;      // Trade time
-  m: boolean;     // Is buyer market maker
-}
 
 interface BinanceAggTrade {
   e: string;      // Event type
@@ -37,22 +32,47 @@ interface BinanceAggTrade {
 export class BinanceWebSocketClient extends EventEmitter {
   private ws: WebSocket | null = null;
   private baseUrl: string;
+  private proxyUrl: string | undefined;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 10;
   private reconnectDelay: number = 1000;
   private isConnecting: boolean = false;
   private shouldReconnect: boolean = true;
   private pingInterval: NodeJS.Timeout | null = null;
-  private subscriptions: Set<string> = new Set();
 
   // Price data storage - last 60 seconds of prices per asset
   private priceData: Map<CryptoAsset, CryptoPriceData> = new Map();
   private maxHistoryLength: number = 600; // 10 minutes of 1-second data
 
-  constructor(baseUrl: string = 'wss://stream.binance.com:9443/ws') {
+  constructor(baseUrl: string = 'wss://stream.binance.com:9443/ws', proxyUrl?: string) {
     super();
     this.baseUrl = baseUrl;
+    this.proxyUrl = proxyUrl;
     this.initializePriceData();
+
+    if (proxyUrl) {
+      logger.info('Binance WebSocket proxy configured', { proxyUrl: proxyUrl.replace(/:[^:@]+@/, ':***@') });
+    }
+  }
+
+  /**
+   * Create proxy agent based on proxy URL scheme
+   */
+  private createProxyAgent(): HttpsProxyAgent<string> | SocksProxyAgent | undefined {
+    if (!this.proxyUrl) return undefined;
+
+    const proxyLower = this.proxyUrl.toLowerCase();
+
+    if (proxyLower.startsWith('socks4://') || proxyLower.startsWith('socks5://') || proxyLower.startsWith('socks://')) {
+      logger.debug('Using SOCKS proxy agent');
+      return new SocksProxyAgent(this.proxyUrl);
+    } else if (proxyLower.startsWith('http://') || proxyLower.startsWith('https://')) {
+      logger.debug('Using HTTPS proxy agent');
+      return new HttpsProxyAgent(this.proxyUrl);
+    } else {
+      logger.warn('Unknown proxy scheme, attempting as HTTP proxy', { proxyUrl: this.proxyUrl });
+      return new HttpsProxyAgent(this.proxyUrl);
+    }
   }
 
   /**
@@ -88,7 +108,16 @@ export class BinanceWebSocketClient extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       try {
-        this.ws = new WebSocket(url);
+        // Create proxy agent if configured
+        const agent = this.createProxyAgent();
+        const wsOptions = agent ? { agent } : undefined;
+
+        logger.debug('Connecting to Binance WebSocket', {
+          url,
+          usingProxy: !!agent,
+        });
+
+        this.ws = new WebSocket(url, wsOptions);
 
         this.ws.on('open', () => {
           this.isConnecting = false;
@@ -110,7 +139,7 @@ export class BinanceWebSocketClient extends EventEmitter {
           }
         });
 
-        this.ws.on('close', (code: number, reason: Buffer) => {
+        this.ws.on('close', (code: number) => {
           this.isConnecting = false;
           logWsEvent('disconnected', 'Binance', `Code: ${code}`);
           this.stopPingInterval();

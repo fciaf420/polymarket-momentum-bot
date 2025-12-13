@@ -3,7 +3,7 @@
  * Handles checking and setting USDC approvals for Polymarket contracts on Polygon
  */
 
-import { ethers, Contract, Wallet, Provider, formatUnits, parseUnits } from 'ethers';
+import { ethers, Contract, Wallet, Provider, formatUnits } from 'ethers';
 import type { Config } from '../types/index.js';
 import logger from '../utils/logger.js';
 import { formatCurrency } from '../utils/helpers.js';
@@ -154,7 +154,6 @@ export class UsdcApprovalManager {
     const statuses: ApprovalStatus[] = [];
     let allApproved = true;
 
-    const usdcAddress = await this.usdcContract!.getAddress();
     const balance = await this.usdcContract!.balanceOf(this.wallet.address);
     const usdcBalance = Number(formatUnits(balance, this.decimals));
 

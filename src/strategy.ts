@@ -14,7 +14,6 @@ import type {
   Signal,
   Position,
   PriceMove,
-  MarketDirection,
   TradeRecord,
   ExitReason,
 } from './types/index.js';
@@ -24,14 +23,13 @@ import {
   PolymarketClobClient,
   MarketDiscoveryClient,
 } from './clients/index.js';
-import { detectHardMove, calculateVolatilityMetrics, isVolatilitySqueeze } from './utils/volatility.js';
+import { detectHardMove } from './utils/volatility.js';
 import {
   calculatePriceGap,
   generateId,
   normalizeSharePrice,
   formatPercent,
   formatCurrency,
-  formatDuration,
 } from './utils/helpers.js';
 import logger, { logSignal, logTrade, logPosition, logRisk } from './utils/logger.js';
 import { TradeHistoryWriter } from './utils/csv.js';
@@ -89,8 +87,8 @@ export class MomentumLagStrategy extends EventEmitter {
       paused: false,
     };
 
-    // Initialize clients
-    this.binanceClient = new BinanceWebSocketClient(config.binanceWsUrl);
+    // Initialize clients (pass proxy URL for geo-restricted regions)
+    this.binanceClient = new BinanceWebSocketClient(config.binanceWsUrl, config.proxyUrl);
     this.polymarketWs = new PolymarketWebSocketClient(config.wsRtdsUrl);
     this.clobClient = new PolymarketClobClient(config);
     this.marketDiscovery = new MarketDiscoveryClient(config.host);
@@ -162,10 +160,13 @@ export class MomentumLagStrategy extends EventEmitter {
       });
 
       // Connect to WebSockets
-      await Promise.all([
-        this.binanceClient.connect(),
-        this.polymarketWs.connect(),
-      ]);
+      const wsConnections = [this.polymarketWs.connect()];
+      if (this.config.binanceFallbackEnabled) {
+        wsConnections.push(this.binanceClient.connect());
+      } else {
+        logger.info('Binance fallback disabled, using Polymarket data only');
+      }
+      await Promise.all(wsConnections);
 
       // Start market discovery
       await this.marketDiscovery.start((markets) => {
@@ -311,7 +312,40 @@ export class MomentumLagStrategy extends EventEmitter {
     for (const market of markets) {
       this.activeMarkets.set(market.conditionId, market);
 
-      // Subscribe to market data
+      // Initialize market prices from token data (from Gamma API)
+      let upPrice = 0.5;
+      let downPrice = 0.5;
+      for (const token of market.tokens) {
+        if (token.tokenId === market.upTokenId) {
+          upPrice = token.price;
+        } else if (token.tokenId === market.downTokenId) {
+          downPrice = token.price;
+        }
+      }
+
+      // Set initial market prices
+      this.marketPrices.set(market.conditionId, {
+        conditionId: market.conditionId,
+        upPrice,
+        downPrice,
+        upImpliedProb: upPrice,
+        downImpliedProb: downPrice,
+        timestamp: Date.now(),
+        bestBidUp: upPrice - 0.01,
+        bestAskUp: upPrice + 0.01,
+        bestBidDown: downPrice - 0.01,
+        bestAskDown: downPrice + 0.01,
+        liquidityUp: 1000, // Assume minimum liquidity
+        liquidityDown: 1000,
+      });
+
+      logger.info('Market prices initialized', {
+        asset: market.asset,
+        upPrice: upPrice.toFixed(2),
+        downPrice: downPrice.toFixed(2),
+      });
+
+      // Subscribe to market data for real-time updates
       this.polymarketWs.subscribeToMarket(market.conditionId, [market.upTokenId, market.downTokenId]);
       this.polymarketWs.subscribeToOrderBook(market.conditionId, market.upTokenId);
       this.polymarketWs.subscribeToOrderBook(market.conditionId, market.downTokenId);

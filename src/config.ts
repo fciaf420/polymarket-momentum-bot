@@ -134,6 +134,11 @@ export function loadConfig(): Config {
     binanceFallbackEnabled: parseBoolean(getOptional('BINANCE_FALLBACK_ENABLED', 'true')),
     binanceWsUrl: getOptional('BINANCE_WS_URL', 'wss://stream.binance.com:9443/ws'),
 
+    // Proxy (for geo-restricted APIs like Binance)
+    // Supports HTTP, HTTPS, SOCKS4, and SOCKS5 proxies
+    // Examples: http://host:port, socks5://user:pass@host:port
+    proxyUrl: process.env.PROXY_URL || undefined,
+
     // API credentials (optional, will be derived if not provided)
     apiKey: process.env.API_KEY || undefined,
     apiSecret: process.env.API_SECRET || undefined,

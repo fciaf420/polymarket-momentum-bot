@@ -289,6 +289,9 @@ export interface Config {
   binanceFallbackEnabled: boolean;
   binanceWsUrl: string;
 
+  // Proxy (for geo-restricted APIs like Binance)
+  proxyUrl?: string;
+
   // API (derived)
   apiKey?: string;
   apiSecret?: string;

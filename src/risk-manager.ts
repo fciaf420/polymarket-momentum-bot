@@ -4,7 +4,7 @@
  */
 
 import { EventEmitter } from 'events';
-import type { Config, Position, AccountBalance, CryptoMarket } from './types/index.js';
+import type { Config, Position, CryptoMarket } from './types/index.js';
 import logger, { logRisk } from './utils/logger.js';
 import { formatPercent, formatCurrency } from './utils/helpers.js';
 
@@ -41,7 +41,6 @@ interface RiskEvent {
 }
 
 export class RiskManager extends EventEmitter {
-  private config: Config;
   private limits: RiskLimits;
   private metrics: RiskMetrics;
   private events: RiskEvent[] = [];
@@ -52,7 +51,6 @@ export class RiskManager extends EventEmitter {
   private sessionStartBalance: number = 0;
   private currentBalance: number = 0;
   private highWaterMark: number = 0;
-  private sessionStartTime: number = 0;
 
   // Circuit breakers
   private isPaused: boolean = false;
@@ -60,7 +58,6 @@ export class RiskManager extends EventEmitter {
 
   constructor(config: Config) {
     super();
-    this.config = config;
 
     // Initialize limits from config
     this.limits = {
@@ -95,7 +92,6 @@ export class RiskManager extends EventEmitter {
     this.sessionStartBalance = startingBalance;
     this.currentBalance = startingBalance;
     this.highWaterMark = startingBalance;
-    this.sessionStartTime = Date.now();
 
     logger.info('Risk manager initialized', {
       startingBalance: formatCurrency(startingBalance),

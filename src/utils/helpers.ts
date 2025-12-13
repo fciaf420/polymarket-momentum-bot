@@ -3,8 +3,8 @@
  * Price normalization, retry logic, and general utilities
  */
 
-import { v4 as uuidv4 } from 'crypto';
-import type { CryptoAsset, CryptoMarket, MarketDirection } from '../types/index.js';
+import { v4 as uuidv4 } from 'uuid';
+import type { CryptoMarket, MarketDirection } from '../types/index.js';
 import logger from './logger.js';
 
 /**
@@ -107,33 +107,44 @@ export function probabilityToPrice(probability: number): number {
 /**
  * Calculate the gap between crypto price direction and market implied probability
  * Returns positive gap if there's a discrepancy worth exploiting
+ *
+ * The gap represents the mispricing: when crypto moves, the market prices
+ * should adjust quickly. If they lag, we can exploit the difference.
  */
 export function calculatePriceGap(
   cryptoMovePercent: number,
   upImpliedProb: number,
   downImpliedProb: number
 ): { gap: number; direction: MarketDirection; tokenSide: 'up' | 'down' } {
-  // If crypto moved up, "Up" shares should be higher than "Down"
-  // If crypto moved down, "Down" shares should be higher than "Up"
+  // If crypto moved up, "Up" shares should be expensive, "Down" cheap
+  // If crypto moved down, "Down" shares should be expensive, "Up" cheap
 
-  if (cryptoMovePercent > 0) {
-    // Crypto went up - "Down" shares should be cheap, "Up" expensive
-    // If "Down" is still >55%, there's a lag
-    if (downImpliedProb > 0.55) {
+  const absMove = Math.abs(cryptoMovePercent);
+
+  if (cryptoMovePercent > 0.01) {
+    // Crypto went up significantly - "Up" shares should be expensive (> 0.55)
+    // If "Up" is still cheap (near 0.5), there's a lag - buy UP shares
+    const expectedUpPrice = Math.min(0.5 + absMove * 5, 0.95);
+    const gap = expectedUpPrice - upImpliedProb;
+
+    if (gap > 0.03) {
       return {
-        gap: downImpliedProb - 0.50, // Gap from fair value
+        gap,
         direction: 'UP',
-        tokenSide: 'up', // Buy "Up" shares which should increase
+        tokenSide: 'up', // Buy "Up" shares which are underpriced
       };
     }
-  } else {
-    // Crypto went down - "Up" shares should be cheap, "Down" expensive
-    // If "Up" is still >55%, there's a lag
-    if (upImpliedProb > 0.55) {
+  } else if (cryptoMovePercent < -0.01) {
+    // Crypto went down significantly - "Down" shares should be expensive
+    // If "Down" is still cheap (near 0.5), there's a lag - buy DOWN shares
+    const expectedDownPrice = Math.min(0.5 + absMove * 5, 0.95);
+    const gap = expectedDownPrice - downImpliedProb;
+
+    if (gap > 0.03) {
       return {
-        gap: upImpliedProb - 0.50,
+        gap,
         direction: 'DOWN',
-        tokenSide: 'down', // Buy "Down" shares which should increase
+        tokenSide: 'down', // Buy "Down" shares which are underpriced
       };
     }
   }

@@ -6,12 +6,8 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import type {
-  CryptoMarket,
-  MarketPriceData,
   OrderBook,
   OrderBookEntry,
-  WSMessage,
-  CryptoAsset,
 } from '../types/index.js';
 import logger, { logWsEvent } from '../utils/logger.js';
 import { sleep, normalizeSharePrice } from '../utils/helpers.js';
@@ -79,7 +75,6 @@ export class PolymarketWebSocketClient extends EventEmitter {
   private subscriptions: Map<string, Set<string>> = new Map();
 
   // Market data storage
-  private marketPrices: Map<string, MarketPriceData> = new Map();
   private orderBooks: Map<string, OrderBook> = new Map();
 
   // Authentication for user channel
@@ -163,8 +158,15 @@ export class PolymarketWebSocketClient extends EventEmitter {
    * Handle incoming WebSocket messages
    */
   private handleMessage(data: WebSocket.Data): void {
+    const dataStr = data.toString();
+
+    // Handle text PONG messages (not JSON)
+    if (dataStr === 'PONG') {
+      return;
+    }
+
     try {
-      const message = JSON.parse(data.toString()) as PolymarketWSMessage;
+      const message = JSON.parse(dataStr) as PolymarketWSMessage;
 
       switch (message.type) {
         case 'price_change':
@@ -350,57 +352,46 @@ export class PolymarketWebSocketClient extends EventEmitter {
 
   /**
    * Subscribe to market price channel
+   * Note: Polymarket WebSocket uses assets_ids array format
    */
-  public subscribeToMarket(conditionId: string, tokenIds: string[]): void {
+  public subscribeToMarket(_conditionId: string, tokenIds: string[]): void {
+    // Store subscriptions for resubscribe
+    const subs = this.subscriptions.get('market') || new Set();
+    tokenIds.forEach(id => subs.add(id));
+    this.subscriptions.set('market', subs);
+
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      // Queue subscription for when connected
-      const subs = this.subscriptions.get('market') || new Set();
-      tokenIds.forEach(id => subs.add(`${conditionId}:${id}`));
-      this.subscriptions.set('market', subs);
       return;
     }
 
-    for (const tokenId of tokenIds) {
-      const message = {
-        type: 'subscribe',
-        channel: 'market',
-        market: conditionId,
-        asset_id: tokenId,
-      };
+    // Polymarket expects assets_ids array format
+    const message = {
+      assets_ids: tokenIds,
+      type: 'market',
+    };
 
-      this.ws.send(JSON.stringify(message));
-      logger.debug('Subscribed to market', { conditionId, tokenId });
-
-      const subs = this.subscriptions.get('market') || new Set();
-      subs.add(`${conditionId}:${tokenId}`);
-      this.subscriptions.set('market', subs);
-    }
+    this.ws.send(JSON.stringify(message));
+    logger.debug('Subscribed to market', { tokenCount: tokenIds.length, tokenIds: tokenIds.slice(0, 2) });
   }
 
   /**
    * Subscribe to order book for a token
+   * Note: Order book updates come through the same market channel
    */
-  public subscribeToOrderBook(conditionId: string, tokenId: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      const subs = this.subscriptions.get('book') || new Set();
-      subs.add(`${conditionId}:${tokenId}`);
-      this.subscriptions.set('book', subs);
-      return;
-    }
-
-    const message = {
-      type: 'subscribe',
-      channel: 'book',
-      market: conditionId,
-      asset_id: tokenId,
-    };
-
-    this.ws.send(JSON.stringify(message));
-    logger.debug('Subscribed to order book', { conditionId, tokenId });
-
+  public subscribeToOrderBook(_conditionId: string, tokenId: string): void {
+    // Store for tracking, but market subscription handles this
     const subs = this.subscriptions.get('book') || new Set();
-    subs.add(`${conditionId}:${tokenId}`);
+    subs.add(tokenId);
     this.subscriptions.set('book', subs);
+
+    // Order book data comes through market channel subscription
+    // Just ensure we're subscribed to the token
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const marketSubs = this.subscriptions.get('market') || new Set();
+      if (!marketSubs.has(tokenId)) {
+        this.subscribeToMarket(_conditionId, [tokenId]);
+      }
+    }
   }
 
   /**
@@ -454,19 +445,23 @@ export class PolymarketWebSocketClient extends EventEmitter {
    * Resubscribe to all channels after reconnection
    */
   private resubscribeAll(): void {
-    for (const [channel, subs] of this.subscriptions) {
-      for (const sub of subs) {
-        if (channel === 'market' || channel === 'book') {
-          const [conditionId, tokenId] = sub.split(':');
-          if (channel === 'market') {
-            this.subscribeToMarket(conditionId, [tokenId]);
-          } else {
-            this.subscribeToOrderBook(conditionId, tokenId);
-          }
-        } else if (channel === 'user') {
-          this.subscribeToUser();
-        }
-      }
+    // Collect all market token IDs
+    const marketTokens = this.subscriptions.get('market');
+    if (marketTokens && marketTokens.size > 0) {
+      const tokenIds = Array.from(marketTokens);
+      // Send one subscription message with all tokens
+      const message = {
+        assets_ids: tokenIds,
+        type: 'market',
+      };
+      this.ws?.send(JSON.stringify(message));
+      logger.debug('Resubscribed to markets', { tokenCount: tokenIds.length });
+    }
+
+    // Handle user channel
+    const userSubs = this.subscriptions.get('user');
+    if (userSubs && userSubs.size > 0) {
+      this.subscribeToUser();
     }
   }
 

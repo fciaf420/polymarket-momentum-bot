@@ -10,14 +10,11 @@ import type {
   BacktestResult,
   TradeRecord,
   PricePoint,
-  HistoricalPrice,
-  Signal,
-  Position,
   MarketDirection,
   ExitReason,
 } from './types/index.js';
 import { loadConfig } from './config.js';
-import { detectHardMove, calculateVolatilityMetrics } from './utils/volatility.js';
+import { detectHardMove } from './utils/volatility.js';
 import { calculatePriceGap, generateId, formatPercent, formatCurrency } from './utils/helpers.js';
 import logger from './utils/logger.js';
 import { TradeHistoryWriter } from './utils/csv.js';
@@ -209,7 +206,6 @@ export class Backtester {
    */
   private simulateHistoricalData(market: SimulatedMarket): HistoricalDataPoint[] {
     const data: HistoricalDataPoint[] = [];
-    const FIFTEEN_MINUTES = 15 * 60 * 1000;
     const SAMPLE_RATE = 1000; // 1 second
 
     // Get base price for asset
@@ -225,11 +221,11 @@ export class Backtester {
     let downPrice = 0.5;
 
     // Simulate random walk with occasional hard moves
-    const hasHardMove = Math.random() < 0.15; // 15% chance of hard move
+    const hasHardMove = Math.random() < 0.40; // 40% chance of hard move (increased for testing)
     const hardMoveDirection = Math.random() < 0.5 ? 1 : -1;
-    const hardMoveStart = market.startTime + Math.floor(Math.random() * 5 * 60 * 1000); // Random start in first 5 min
-    const hardMoveDuration = 30 + Math.floor(Math.random() * 30); // 30-60 seconds
-    const hardMoveMagnitude = 0.02 + Math.random() * 0.03; // 2-5% move
+    const hardMoveStart = market.startTime + Math.floor(Math.random() * 3 * 60 * 1000); // Random start in first 3 min
+    const hardMoveDuration = 20 + Math.floor(Math.random() * 40); // 20-60 seconds
+    const hardMoveMagnitude = 0.03 + Math.random() * 0.04; // 3-7% move (larger for testing)
 
     // Volatility parameters
     const baseVolatility = 0.0001; // Per-second volatility
@@ -243,13 +239,11 @@ export class Backtester {
 
     let currentTime = market.startTime;
     let inHardMove = false;
-    let hardMoveProgress = 0;
 
     while (currentTime < market.endTime) {
       // Check if entering hard move
       if (hasHardMove && currentTime >= hardMoveStart && currentTime < hardMoveStart + hardMoveDuration * 1000) {
         inHardMove = true;
-        hardMoveProgress = (currentTime - hardMoveStart) / (hardMoveDuration * 1000);
       } else {
         inHardMove = false;
       }
@@ -283,7 +277,8 @@ export class Backtester {
       const targetDownPrice = 1 - targetUpPrice;
 
       // Add lag to market prices (30-90 second lag during hard moves)
-      const lagFactor = inHardMove ? 0.02 : 0.1; // Slower update during hard moves
+      // During hard moves, market prices update very slowly creating exploitable gaps
+      const lagFactor = inHardMove ? 0.005 : 0.08; // Much slower update during hard moves
       upPrice += (Math.max(0.01, Math.min(0.99, targetUpPrice)) - upPrice) * lagFactor;
       downPrice += (Math.max(0.01, Math.min(0.99, targetDownPrice)) - downPrice) * lagFactor;
 
@@ -313,7 +308,6 @@ export class Backtester {
   ): Promise<TradeRecord | null> {
     const priceHistory: PricePoint[] = [];
     let position: SimulatedPosition | null = null;
-    let entryIndex = 0;
 
     // Scan through data
     for (let i = 0; i < data.length; i++) {
@@ -405,6 +399,18 @@ export class Backtester {
       // Calculate gap
       const gapResult = calculatePriceGap(move.movePercent, point.upPrice, point.downPrice);
 
+      // Debug: Log first few signals found
+      if (this.tradeHistory.length === 0 && position === null) {
+        logger.debug('Potential signal found', {
+          asset: market.asset,
+          movePercent: (move.movePercent * 100).toFixed(2) + '%',
+          upPrice: point.upPrice.toFixed(4),
+          downPrice: point.downPrice.toFixed(4),
+          gap: (gapResult.gap * 100).toFixed(2) + '%',
+          threshold: (this.config.gapThreshold * 100).toFixed(2) + '%',
+        });
+      }
+
       if (gapResult.gap < this.config.gapThreshold) {
         continue;
       }
@@ -428,8 +434,6 @@ export class Backtester {
         signalGap: gapResult.gap,
         signalConfidence: confidence,
       };
-
-      entryIndex = i;
     }
 
     // Position still open at end - close at market resolution
@@ -600,5 +604,4 @@ if (process.argv[1]?.endsWith('backtest.ts') || process.argv[1]?.endsWith('backt
   });
 }
 
-export { Backtester };
 export default Backtester;

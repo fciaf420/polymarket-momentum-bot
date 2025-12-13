@@ -97,7 +97,6 @@ export function logTrade(trade: {
   pnl?: number;
 }): void {
   const emoji = trade.action === 'ENTRY' ? '>>>' : '<<<';
-  const pnlStr = trade.pnl !== undefined ? ` | PnL: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)} USDC` : '';
 
   logger.info(`${emoji} ${trade.action} ${trade.asset} ${trade.side}`, {
     price: trade.price.toFixed(4),

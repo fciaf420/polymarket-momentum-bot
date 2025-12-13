@@ -3,7 +3,7 @@
  * Implements Bollinger Bands and volatility metrics for momentum detection
  */
 
-import { BollingerBands, StandardDeviation, SMA } from 'technicalindicators';
+import { BollingerBands } from 'technicalindicators';
 import type { VolatilityMetrics, PricePoint, PriceMove, CryptoAsset } from '../types/index.js';
 
 /**
@@ -47,12 +47,17 @@ export function calculateStandardDeviation(prices: number[], period: number = 20
     return null;
   }
 
-  const result = StandardDeviation.calculate({
-    period,
-    values: prices,
-  });
+  // Get last 'period' prices
+  const recentPrices = prices.slice(-period);
 
-  return result.length > 0 ? result[result.length - 1] : null;
+  // Calculate mean
+  const mean = recentPrices.reduce((sum, p) => sum + p, 0) / period;
+
+  // Calculate variance
+  const variance = recentPrices.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / period;
+
+  // Return standard deviation
+  return Math.sqrt(variance);
 }
 
 /**
@@ -103,8 +108,9 @@ export function detectHardMove(
     return null;
   }
 
-  const now = Date.now();
-  const recentPrices = priceHistory.filter(p => now - p.timestamp <= maxDurationSeconds * 1000);
+  // Use the most recent price's timestamp as "now" (works for both live and backtest)
+  const latestTimestamp = priceHistory[priceHistory.length - 1].timestamp;
+  const recentPrices = priceHistory.filter(p => latestTimestamp - p.timestamp <= maxDurationSeconds * 1000);
 
   if (recentPrices.length < 2) {
     return null;
@@ -175,8 +181,9 @@ export function detectHardMove(
  * Calculate the rate of price change (velocity)
  */
 export function calculatePriceVelocity(priceHistory: PricePoint[], periodSeconds: number = 10): number | null {
-  const now = Date.now();
-  const recentPrices = priceHistory.filter(p => now - p.timestamp <= periodSeconds * 1000);
+  if (priceHistory.length === 0) return null;
+  const latestTimestamp = priceHistory[priceHistory.length - 1].timestamp;
+  const recentPrices = priceHistory.filter(p => latestTimestamp - p.timestamp <= periodSeconds * 1000);
 
   if (recentPrices.length < 2) {
     return null;
@@ -211,8 +218,9 @@ export function isVolatilitySqueeze(
  * Calculate rolling average price
  */
 export function calculateRollingAverage(priceHistory: PricePoint[], periodSeconds: number): number | null {
-  const now = Date.now();
-  const recentPrices = priceHistory.filter(p => now - p.timestamp <= periodSeconds * 1000);
+  if (priceHistory.length === 0) return null;
+  const latestTimestamp = priceHistory[priceHistory.length - 1].timestamp;
+  const recentPrices = priceHistory.filter(p => latestTimestamp - p.timestamp <= periodSeconds * 1000);
 
   if (recentPrices.length === 0) {
     return null;

@@ -21,13 +21,17 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@polymarket/clob-client": "^5.3.0",
+    "@polymarket/clob-client": "^4.22.8",
+    "@types/uuid": "^10.0.0",
     "axios": "^1.6.0",
     "cron": "^3.1.0",
     "csv-writer": "^1.6.0",
     "dotenv": "^16.3.0",
     "ethers": "^6.9.0",
+    "https-proxy-agent": "^7.0.6",
+    "socks-proxy-agent": "^8.0.5",
     "technicalindicators": "^3.1.0",
+    "uuid": "^13.0.0",
     "winston": "^3.11.0",
     "ws": "^8.14.0"
   },
@@ -35,8 +39,8 @@
     "@types/cron": "^2.4.0",
     "@types/node": "^20.10.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.3.0",
-    "ts-node": "^10.9.0"
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0"
   },
   "engines": {
     "node": ">=20.0.0"
