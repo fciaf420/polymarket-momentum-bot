@@ -746,12 +746,6 @@ export class MomentumLagStrategy extends EventEmitter {
       return;
     }
 
-    // Check if already have a position in this market
-    if (this.state.positions.has(conditionId)) {
-      logger.debug('Skipping signal - already have position in this market');
-      return;
-    }
-
     // Check if execution is already in progress for this market
     if (this.pendingExecutions.has(conditionId)) {
       logger.debug('Skipping signal - execution already in progress');
