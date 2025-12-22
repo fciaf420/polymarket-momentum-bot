@@ -96,7 +96,7 @@ export class MomentumLagStrategy extends EventEmitter {
     this.binanceClient = new BinanceWebSocketClient(config.binanceWsUrl, config.proxyUrl);
     this.polymarketWs = new PolymarketWebSocketClient(config.wsRtdsUrl);
     this.clobClient = new PolymarketClobClient(config);
-    this.marketDiscovery = new MarketDiscoveryClient(config.host);
+    this.marketDiscovery = new MarketDiscoveryClient(config.host, config.maxHoldMinutes);
 
     // Initialize trade history writer
     this.tradeHistory = new TradeHistoryWriter(config.tradeHistoryPath);

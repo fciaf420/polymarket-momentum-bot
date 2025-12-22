@@ -90,12 +90,14 @@ export class MarketDiscoveryClient {
   private activeMarkets: Map<string, CryptoMarket> = new Map();
   private refreshJob: CronJob | null = null;
   private onMarketsUpdate: ((markets: CryptoMarket[]) => void) | null = null;
+  private maxHoldMinutes: number;
 
   // API endpoints
   private static readonly CLOB_API = 'https://clob.polymarket.com';
   private static readonly GAMMA_API = 'https://gamma-api.polymarket.com';
 
-  constructor(host: string) {
+  constructor(host: string, maxHoldMinutes: number = 12) {
+    this.maxHoldMinutes = maxHoldMinutes;
     // CLOB API client
     this.clobClient = axios.create({
       baseURL: host || MarketDiscoveryClient.CLOB_API,
@@ -388,14 +390,16 @@ export class MarketDiscoveryClient {
 
   /**
    * Check if expiry time is valid for trading
-   * Must have at least 2 min until expiry to safely enter a position
+   * - Min: 2 minutes (hardcoded safety - need time to execute)
+   * - Max: maxHoldMinutes + 2 (from env config)
    */
   private isValidExpiry(expiryTime: Date): boolean {
     const now = Date.now();
     const timeToExpiry = expiryTime.getTime() - now;
+    const minMs = 2 * 60 * 1000; // 2 min minimum (hardcoded)
+    const maxMs = (this.maxHoldMinutes + 2) * 60 * 1000; // maxHoldMinutes + 2 min buffer
 
-    // Must have at least 2 min until expiry (hardcoded safety minimum)
-    return timeToExpiry >= 2 * 60 * 1000;
+    return timeToExpiry >= minMs && timeToExpiry <= maxMs;
   }
 
   /**
