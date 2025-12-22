@@ -323,12 +323,15 @@ export class MomentumLagStrategy extends EventEmitter {
    * Handle markets update from discovery
    */
   private handleMarketsUpdate(markets: CryptoMarket[]): void {
+    // Clear both maps to ensure fresh data for new markets
+    // This is critical when markets expire and new ones are discovered
     this.activeMarkets.clear();
+    this.marketPrices.clear();
 
     for (const market of markets) {
       this.activeMarkets.set(market.conditionId, market);
 
-      // Initialize market prices from token data (from Gamma API)
+      // Initialize market prices from token data (live prices from CLOB /midpoint API)
       let upPrice = 0.5;
       let downPrice = 0.5;
 
