@@ -394,8 +394,8 @@ export class MarketDiscoveryClient {
     const now = Date.now();
     const timeToExpiry = expiryTime.getTime() - now;
 
-    // Must expire in 2-20 minutes (need at least 2 min to trade, max 20 min window)
-    return timeToExpiry >= 2 * 60 * 1000 && timeToExpiry <= 20 * 60 * 1000;
+    // Must expire in 2-14 minutes (need at least 2 min to trade, max 14 min for 12-min hold + buffer)
+    return timeToExpiry >= 2 * 60 * 1000 && timeToExpiry <= 14 * 60 * 1000;
   }
 
   /**
