@@ -1,10 +1,13 @@
 {
   "name": "polymarket-momentum-bot",
   "version": "1.0.0",
+  "type": "module",
   "description": "Production-ready trading bot exploiting momentum lags in Polymarket's 15-minute crypto prediction markets",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "build:dashboard": "cd dashboard && npm run build",
+    "build:all": "npm run build && npm run build:dashboard",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "backtest": "ts-node src/backtest.ts",
@@ -24,10 +27,12 @@
     "@polymarket/clob-client": "^4.22.8",
     "@types/uuid": "^10.0.0",
     "axios": "^1.6.0",
+    "cors": "^2.8.5",
     "cron": "^3.1.0",
     "csv-writer": "^1.6.0",
     "dotenv": "^16.3.0",
     "ethers": "^6.9.0",
+    "express": "^5.2.1",
     "https-proxy-agent": "^7.0.6",
     "socks-proxy-agent": "^8.0.5",
     "technicalindicators": "^3.1.0",
@@ -36,7 +41,9 @@
     "ws": "^8.14.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/cron": "^2.4.0",
+    "@types/express": "^5.0.6",
     "@types/node": "^20.10.0",
     "@types/ws": "^8.5.10",
     "ts-node": "^10.9.0",

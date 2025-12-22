@@ -34,11 +34,17 @@ cd polymarket-momentum-bot
 # Install dependencies
 npm install
 
+# Install dashboard dependencies
+cd dashboard && npm install && cd ..
+
 # Copy environment configuration
 cp .env.example .env
 
 # Edit .env with your settings
 nano .env
+
+# Build everything
+npm run build:all
 ```
 
 ## Configuration
@@ -63,6 +69,13 @@ MAX_DRAWDOWN=0.10         # 10% max drawdown
 # Operation mode
 BACKTEST=true             # Set to false for live trading
 DRY_RUN=true              # Set to false to execute real trades
+
+# Dashboard
+DASHBOARD_ENABLED=true    # Enable real-time dashboard
+DASHBOARD_PORT=3001       # Dashboard server port
+
+# Polymarket Wallet (optional)
+POLYMARKET_WALLET=        # Your Polymarket Safe/proxy wallet address (if different from EOA)
 ```
 
 ## Usage
@@ -97,6 +110,56 @@ npm start
 npm start
 ```
 
+## Dashboard
+
+The bot includes a real-time web dashboard for monitoring trading activity.
+
+### Features
+
+- **Live Status**: Running/Paused/Stopped indicator with uptime
+- **Account Stats**: Balance, P&L, drawdown, win rate
+- **Open Positions**: Real-time position cards with unrealized P&L
+- **Signal Feed**: Recent trading signals with execution status
+- **Risk Metrics**: Drawdown, Sharpe ratio, profit factor
+- **Price Monitor**: Live crypto prices with real-time market odds
+  - Current UP/DOWN percentages for each asset
+  - Countdown timer until market expiry
+  - Visual odds bar showing probability distribution
+  - Active markets list with expiry times
+- **Trade History**: Paginated trade log with filters
+- **WebSocket Health**: Connection status for Dashboard, Binance, and Polymarket feeds
+
+### Accessing the Dashboard
+
+When the bot is running, open your browser to:
+
+```
+http://localhost:3001
+```
+
+### Dashboard Controls
+
+- **Pause/Resume**: Stop scanning for new trades without closing positions
+- **Connection Indicators**: Shows status of all WebSocket connections
+  - `Dash` - Dashboard WebSocket
+  - `BN` - Binance price feed
+  - `PM` - Polymarket market data
+
+### API Endpoints
+
+The dashboard exposes REST API endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/status` | Bot running state |
+| `GET /api/account` | Balance and P&L |
+| `GET /api/positions` | Open positions |
+| `GET /api/signals` | Recent signals |
+| `GET /api/trades` | Trade history |
+| `GET /api/risk/metrics` | Risk indicators |
+| `POST /api/control/pause` | Pause trading |
+| `POST /api/control/resume` | Resume trading |
+
 ## Project Structure
 
 ```
@@ -110,7 +173,12 @@ src/
 │   ├── binance-ws.ts     # Binance WebSocket for price feeds
 │   ├── polymarket-ws.ts  # Polymarket real-time data
 │   ├── clob-client.ts    # Polymarket CLOB trading client
+│   ├── usdc-approval.ts  # USDC contract approvals
 │   └── market-discovery.ts # Active market discovery
+├── dashboard/
+│   ├── server.ts         # Express + WebSocket server
+│   ├── state.ts          # State aggregation
+│   └── index.ts          # Dashboard exports
 ├── types/
 │   └── index.ts          # TypeScript type definitions
 └── utils/
@@ -118,7 +186,26 @@ src/
     ├── volatility.ts     # Bollinger Bands & volatility
     ├── helpers.ts        # Utility functions
     └── csv.ts            # Trade history export
+
+dashboard/                # React frontend (Vite + Tailwind)
+├── src/
+│   ├── components/       # React components
+│   ├── hooks/            # Custom hooks (useWebSocket)
+│   ├── services/         # API client
+│   └── types/            # TypeScript types
+├── vite.config.ts
+└── package.json
 ```
+
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run build` | Build backend TypeScript |
+| `npm run build:dashboard` | Build React dashboard |
+| `npm run build:all` | Build both backend and dashboard |
+| `npm start` | Run the bot (with dashboard) |
+| `npm run backtest` | Run backtesting |
 
 ## Architecture
 

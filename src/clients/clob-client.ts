@@ -5,10 +5,30 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { Wallet } from 'ethers';
+import { Wallet, ethers, Contract } from 'ethers';
 import type { Config, Order, CryptoMarket } from '../types/index.js';
 import logger from '../utils/logger.js';
 import { retryWithBackoff, generateId } from '../utils/helpers.js';
+
+// ERC20 ABI for balance checking
+const ERC20_BALANCE_ABI = ['function balanceOf(address account) view returns (uint256)'];
+
+// USDC contract addresses on Polygon
+const USDC_CONTRACTS = {
+  USDC_E: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+  USDC_NATIVE: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+};
+
+/**
+ * Wraps an ethers v6 wallet to be compatible with ethers v5 API
+ * that the @polymarket/clob-client expects
+ */
+function wrapWalletForClobClient(wallet: Wallet): Wallet & { _signTypedData: typeof wallet.signTypedData } {
+  // Add _signTypedData method that ethers v5 used (now signTypedData in v6)
+  const wrappedWallet = wallet as Wallet & { _signTypedData: typeof wallet.signTypedData };
+  wrappedWallet._signTypedData = wallet.signTypedData.bind(wallet);
+  return wrappedWallet;
+}
 
 // Dynamic import for ClobClient since it may not have proper types
 let ClobClient: any;
@@ -84,24 +104,36 @@ export class PolymarketClobClient {
       // Initialize CLOB client
       const chain = this.config.chainId === 137 ? Chain.POLYGON : Chain.AMOY;
 
+      // Wrap wallet for ethers v5 compatibility
+      const wrappedWallet = wrapWalletForClobClient(this.wallet);
+
       if (this.apiCreds) {
         this.client = new ClobClient(
           this.config.host,
           chain,
-          this.wallet,
+          wrappedWallet,
           this.apiCreds
         );
       } else {
         this.client = new ClobClient(
           this.config.host,
           chain,
-          this.wallet
+          wrappedWallet
         );
 
         // Derive API credentials
         try {
           this.apiCreds = await this.client.deriveApiKey();
           logger.info('Derived new API credentials');
+
+          // Recreate client with the derived credentials
+          this.client = new ClobClient(
+            this.config.host,
+            chain,
+            wrappedWallet,
+            this.apiCreds
+          );
+          logger.info('CLOB client recreated with API credentials');
         } catch (error) {
           logger.warn('Could not derive API credentials', { error: (error as Error).message });
         }
@@ -118,6 +150,7 @@ export class PolymarketClobClient {
 
   /**
    * Get account balance
+   * Uses on-chain balance check (supports proxy wallets) with API fallback
    */
   public async getBalance(): Promise<number> {
     if (this.dryRun) {
@@ -126,17 +159,39 @@ export class PolymarketClobClient {
 
     await this.ensureInitialized();
 
-    try {
-      const balance = await retryWithBackoff(
-        () => this.client.getBalanceAllowance({ asset_type: 'USDC' }) as Promise<{ balance?: string }>,
-        { maxRetries: 3 }
-      );
+    // Use on-chain balance check (works with proxy wallets)
+    const balanceAddress = this.config.polymarketWallet || this.wallet.address;
 
-      // Balance is in USDC with 6 decimals
-      return parseFloat(balance?.balance || '0') / 1e6;
+    try {
+      const provider = new ethers.JsonRpcProvider('https://polygon-rpc.com');
+
+      // Try USDC.e first (more common on Polymarket)
+      let contract = new Contract(USDC_CONTRACTS.USDC_E, ERC20_BALANCE_ABI, provider);
+      let balance = await contract.balanceOf(balanceAddress);
+
+      if (balance > 0n) {
+        return Number(balance) / 1e6;
+      }
+
+      // Try native USDC
+      contract = new Contract(USDC_CONTRACTS.USDC_NATIVE, ERC20_BALANCE_ABI, provider);
+      balance = await contract.balanceOf(balanceAddress);
+
+      return Number(balance) / 1e6;
     } catch (error) {
-      logger.error('Failed to get balance', { error: (error as Error).message });
-      throw error;
+      logger.warn('On-chain balance check failed, trying API', { error: (error as Error).message });
+
+      // Fallback to API (may not work with proxy wallets)
+      try {
+        const balance = await retryWithBackoff(
+          () => this.client.getBalanceAllowance({ asset_type: 'USDC' }) as Promise<{ balance?: string }>,
+          { maxRetries: 2 }
+        );
+        return parseFloat(balance?.balance || '0') / 1e6;
+      } catch (apiError) {
+        logger.error('Failed to get balance from both on-chain and API', { error: (apiError as Error).message });
+        return 0;
+      }
     }
   }
 

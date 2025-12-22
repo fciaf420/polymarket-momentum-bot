@@ -97,6 +97,8 @@ export function loadConfig(): Config {
   const config: Config = {
     // Wallet - private key without 0x prefix
     privateKey: getRequired('PRIVATE_KEY').replace('0x', ''),
+    // Polymarket Safe/proxy wallet (optional - uses EOA if not set)
+    polymarketWallet: process.env.POLYMARKET_WALLET || undefined,
 
     // Polymarket
     host: getOptional('HOST', 'https://clob.polymarket.com'),
@@ -143,6 +145,10 @@ export function loadConfig(): Config {
     apiKey: process.env.API_KEY || undefined,
     apiSecret: process.env.API_SECRET || undefined,
     apiPassphrase: process.env.API_PASSPHRASE || undefined,
+
+    // Dashboard
+    dashboardEnabled: parseBoolean(getOptional('DASHBOARD_ENABLED', 'true')),
+    dashboardPort: parseNumber(getOptional('DASHBOARD_PORT', '3001')),
   };
 
   // Validate configuration

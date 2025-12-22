@@ -252,6 +252,7 @@ export interface TradeMessage {
 export interface Config {
   // Wallet
   privateKey: string;
+  polymarketWallet?: string;  // Polymarket Safe/proxy wallet address (if different from EOA)
 
   // Polymarket
   host: string;
@@ -296,6 +297,10 @@ export interface Config {
   apiKey?: string;
   apiSecret?: string;
   apiPassphrase?: string;
+
+  // Dashboard
+  dashboardEnabled: boolean;
+  dashboardPort: number;
 }
 
 // ===========================================

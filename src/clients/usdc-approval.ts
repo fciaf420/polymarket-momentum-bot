@@ -63,6 +63,8 @@ export class UsdcApprovalManager {
   private contracts: typeof POLYGON_CONTRACTS;
   private usdcContract: Contract | null = null;
   private decimals: number = 6;
+  // Address to check balance for (may be different from signing wallet)
+  private balanceCheckAddress: string;
 
   // Maximum approval amount (max uint256 for unlimited)
   private readonly MAX_APPROVAL = ethers.MaxUint256;
@@ -80,6 +82,9 @@ export class UsdcApprovalManager {
     this.provider = new ethers.JsonRpcProvider(rpcUrl);
     this.wallet = new Wallet(config.privateKey, this.provider);
 
+    // Use Polymarket Safe wallet for balance checks if configured, otherwise use EOA
+    this.balanceCheckAddress = config.polymarketWallet || this.wallet.address;
+
     // Use appropriate contracts based on chain
     this.contracts = config.chainId === 137 ? POLYGON_CONTRACTS : AMOY_CONTRACTS;
   }
@@ -88,9 +93,12 @@ export class UsdcApprovalManager {
    * Initialize and detect which USDC contract has balance
    */
   public async initialize(): Promise<void> {
+    const isUsingProxyWallet = this.balanceCheckAddress !== this.wallet.address;
     logger.info('Initializing USDC approval manager', {
       chain: this.config.chainId === 137 ? 'Polygon Mainnet' : 'Amoy Testnet',
-      wallet: this.wallet.address,
+      signingWallet: this.wallet.address,
+      balanceWallet: this.balanceCheckAddress,
+      usingProxyWallet: isUsingProxyWallet,
     });
 
     // Try USDC.e first (more commonly used on Polymarket)
@@ -98,7 +106,7 @@ export class UsdcApprovalManager {
     let contract = new Contract(usdcAddress, ERC20_ABI, this.wallet);
 
     try {
-      const balance = await contract.balanceOf(this.wallet.address);
+      const balance = await contract.balanceOf(this.balanceCheckAddress);
       const decimals = await contract.decimals();
       this.decimals = Number(decimals);
 
@@ -119,7 +127,7 @@ export class UsdcApprovalManager {
     contract = new Contract(usdcAddress, ERC20_ABI, this.wallet);
 
     try {
-      const balance = await contract.balanceOf(this.wallet.address);
+      const balance = await contract.balanceOf(this.balanceCheckAddress);
       const decimals = await contract.decimals();
       this.decimals = Number(decimals);
       this.usdcContract = contract;
@@ -154,7 +162,7 @@ export class UsdcApprovalManager {
     const statuses: ApprovalStatus[] = [];
     let allApproved = true;
 
-    const balance = await this.usdcContract!.balanceOf(this.wallet.address);
+    const balance = await this.usdcContract!.balanceOf(this.balanceCheckAddress);
     const usdcBalance = Number(formatUnits(balance, this.decimals));
 
     for (const spender of spenders) {
@@ -181,13 +189,13 @@ export class UsdcApprovalManager {
 
     const usdcAddress = await this.usdcContract!.getAddress();
 
-    // Get current allowance
-    const allowance = await this.usdcContract!.allowance(this.wallet.address, spenderAddress);
+    // Get current allowance (check on balance wallet - for Safe wallets, approvals are on the Safe)
+    const allowance = await this.usdcContract!.allowance(this.balanceCheckAddress, spenderAddress);
     const currentAllowance = Number(formatUnits(allowance, this.decimals));
 
     // Get balance if not provided
     if (usdcBalance === undefined) {
-      const balance = await this.usdcContract!.balanceOf(this.wallet.address);
+      const balance = await this.usdcContract!.balanceOf(this.balanceCheckAddress);
       usdcBalance = Number(formatUnits(balance, this.decimals));
     }
 
@@ -322,7 +330,7 @@ export class UsdcApprovalManager {
   public async getBalance(): Promise<number> {
     await this.ensureInitialized();
 
-    const balance = await this.usdcContract!.balanceOf(this.wallet.address);
+    const balance = await this.usdcContract!.balanceOf(this.balanceCheckAddress);
     return Number(formatUnits(balance, this.decimals));
   }
 

@@ -17,6 +17,8 @@ import { loadConfig, SUPPORTED_ASSETS } from './config.js';
 import { MomentumLagStrategy } from './strategy.js';
 import { Backtester } from './backtest.js';
 import { checkAndApproveUsdc, UsdcApprovalManager } from './clients/usdc-approval.js';
+import { RiskManager } from './risk-manager.js';
+import { DashboardServer } from './dashboard/index.js';
 import logger from './utils/logger.js';
 import { formatCurrency, formatPercent } from './utils/helpers.js';
 
@@ -60,11 +62,16 @@ function printConfig(config: ReturnType<typeof loadConfig>): void {
 }
 
 // Handle graceful shutdown
-function setupGracefulShutdown(strategy: MomentumLagStrategy): void {
+function setupGracefulShutdown(strategy: MomentumLagStrategy, dashboardServer?: DashboardServer | null): void {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`Received ${signal}, shutting down gracefully...`);
 
     try {
+      // Stop dashboard server first
+      if (dashboardServer) {
+        await dashboardServer.stop();
+      }
+
       await strategy.stop();
       logger.info('Bot stopped successfully');
       process.exit(0);
@@ -189,8 +196,20 @@ async function runLive(config: ReturnType<typeof loadConfig>): Promise<void> {
   // Step 2: Initialize and start strategy
   const strategy = new MomentumLagStrategy(config);
 
+  // Step 3: Initialize risk manager
+  const riskManager = new RiskManager(config);
+  riskManager.initialize(balance);
+
+  // Step 4: Start dashboard server if enabled
+  let dashboardServer: DashboardServer | null = null;
+  if (config.dashboardEnabled) {
+    dashboardServer = new DashboardServer(strategy, riskManager, config);
+    await dashboardServer.start();
+    logger.info(`Dashboard available at http://localhost:${config.dashboardPort}`);
+  }
+
   // Setup graceful shutdown
-  setupGracefulShutdown(strategy);
+  setupGracefulShutdown(strategy, dashboardServer);
 
   // Setup event listeners for monitoring
   strategy.on('positionOpened', (position) => {

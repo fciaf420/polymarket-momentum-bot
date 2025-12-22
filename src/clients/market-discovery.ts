@@ -238,9 +238,19 @@ export class MarketDiscoveryClient {
 
       logger.debug(`Series ${seriesSlug} has ${events.length} events`);
 
-      // Find active, non-closed events
+      // Find active, non-closed events within our trading window
       for (const event of events) {
         if (event.closed) continue;
+
+        // EARLY FILTER: Check event endDate before making API call
+        const eventEndDate = new Date(event.endDate);
+        const now = Date.now();
+        const timeToExpiry = eventEndDate.getTime() - now;
+
+        // Skip events outside 2-20 minute window
+        if (timeToExpiry < 2 * 60 * 1000 || timeToExpiry > 20 * 60 * 1000) {
+          continue;
+        }
 
         // Also try to fetch the event directly to get full market data
         try {
@@ -258,11 +268,15 @@ export class MarketDiscoveryClient {
             const cryptoMarket = this.parseEventMarket(market, fullEvent, asset);
             if (cryptoMarket) {
               markets.push(cryptoMarket);
-              logger.info('Found 15m market', {
+              // Get UP/DOWN prices for logging
+              const upToken = cryptoMarket.tokens?.find(t => t.outcome.toLowerCase() === 'up');
+              const downToken = cryptoMarket.tokens?.find(t => t.outcome.toLowerCase() === 'down');
+              logger.info('Found active 15m market', {
                 asset,
-                question: market.question.substring(0, 50),
-                endDate: market.endDate,
-                acceptingOrders: market.acceptingOrders,
+                question: market.question.substring(0, 45),
+                upPrice: upToken ? (upToken.price * 100).toFixed(1) + '%' : '?',
+                downPrice: downToken ? (downToken.price * 100).toFixed(1) + '%' : '?',
+                expiresIn: Math.round((new Date(market.endDate).getTime() - Date.now()) / 60000) + 'm',
               });
             }
           }
@@ -295,6 +309,14 @@ export class MarketDiscoveryClient {
       outcomes = JSON.parse(market.outcomes || '[]');
       prices = JSON.parse(market.outcomePrices || '[]');
       tokenIds = JSON.parse(market.clobTokenIds || '[]');
+
+      // Log parsed data for debugging
+      logger.debug('Parsed market data', {
+        question: market.question.substring(0, 40),
+        outcomes,
+        prices,
+        outcomePricesRaw: market.outcomePrices,
+      });
     } catch (e) {
       logger.debug('Failed to parse market JSON fields', { error: (e as Error).message });
       return null;
@@ -359,14 +381,14 @@ export class MarketDiscoveryClient {
 
   /**
    * Check if expiry time is valid for trading
-   * We want markets expiring in 1-60 minutes (wider window to always find markets)
+   * Only want the next 1-2 markets (expiring in 2-20 minutes)
    */
   private isValidExpiry(expiryTime: Date): boolean {
     const now = Date.now();
     const timeToExpiry = expiryTime.getTime() - now;
 
-    // Must expire in 1-60 minutes (need at least 1 min to trade)
-    return timeToExpiry >= 1 * 60 * 1000 && timeToExpiry <= 60 * 60 * 1000;
+    // Must expire in 2-20 minutes (need at least 2 min to trade, max 20 min window)
+    return timeToExpiry >= 2 * 60 * 1000 && timeToExpiry <= 20 * 60 * 1000;
   }
 
   /**

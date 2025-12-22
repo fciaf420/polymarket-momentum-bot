@@ -49,7 +49,7 @@ export class PolymarketWebSocketClient extends EventEmitter {
   private reconnectDelay: number = 1000;
   private isConnecting: boolean = false;
   private shouldReconnect: boolean = true;
-  private pingInterval: NodeJS.Timeout | null = null;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
   private subscriptions: Map<string, Set<string>> = new Map();
 
   // Market data storage
@@ -142,8 +142,14 @@ export class PolymarketWebSocketClient extends EventEmitter {
   private handleMessage(data: WebSocket.Data): void {
     const dataStr = data.toString();
 
-    // Handle text PONG messages (not JSON)
+    // Handle text messages (not JSON)
     if (dataStr === 'PONG') {
+      return;
+    }
+
+    // Handle error responses like "INVALID OPERATION"
+    if (dataStr.startsWith('INVALID') || !dataStr.startsWith('{') && !dataStr.startsWith('[')) {
+      logger.debug('Non-JSON WebSocket message', { message: dataStr.substring(0, 50) });
       return;
     }
 
@@ -161,7 +167,7 @@ export class PolymarketWebSocketClient extends EventEmitter {
       // Handle single message
       this.processMessage(parsed as PolymarketWSMessage);
     } catch (error) {
-      logger.error('Error parsing Polymarket message', { error: (error as Error).message });
+      logger.debug('Failed to parse WebSocket message', { preview: dataStr.substring(0, 50) });
     }
   }
 

@@ -68,8 +68,8 @@ export class MomentumLagStrategy extends EventEmitter {
   private tradeHistory: TradeHistoryWriter;
 
   // Monitoring intervals
-  private scanInterval: NodeJS.Timeout | null = null;
-  private positionMonitorInterval: NodeJS.Timeout | null = null;
+  private scanInterval: ReturnType<typeof setInterval> | null = null;
+  private positionMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: Config) {
     super();
@@ -282,13 +282,6 @@ export class MomentumLagStrategy extends EventEmitter {
 
         existing.timestamp = timestamp;
         this.marketPrices.set(conditionId, existing);
-
-        // Log price updates at debug level
-        logger.debug('Price update', {
-          asset: market.asset,
-          upPrice: existing.upPrice.toFixed(2),
-          downPrice: existing.downPrice.toFixed(2),
-        });
         break;
       }
     }
@@ -322,6 +315,7 @@ export class MomentumLagStrategy extends EventEmitter {
       // Initialize market prices from token data (from Gamma API)
       let upPrice = 0.5;
       let downPrice = 0.5;
+
       for (const token of market.tokens) {
         if (token.tokenId === market.upTokenId) {
           upPrice = token.price;
@@ -840,6 +834,51 @@ export class MomentumLagStrategy extends EventEmitter {
    */
   public getPositions(): Position[] {
     return Array.from(this.state.positions.values());
+  }
+
+  /**
+   * Get recent signals (for dashboard)
+   */
+  public getSignals(limit: number = 50): Signal[] {
+    return this.state.signals.slice(-limit);
+  }
+
+  /**
+   * Get crypto prices (for dashboard)
+   */
+  public getCryptoPrices(): Map<CryptoAsset, CryptoPriceData> {
+    return new Map(this.cryptoPrices);
+  }
+
+  /**
+   * Get market prices (for dashboard)
+   */
+  public getMarketPrices(): Map<string, MarketPriceData> {
+    return new Map(this.marketPrices);
+  }
+
+  /**
+   * Get active markets (for dashboard)
+   */
+  public getActiveMarkets(): CryptoMarket[] {
+    return Array.from(this.activeMarkets.values());
+  }
+
+  /**
+   * Get trade history writer (for dashboard)
+   */
+  public getTradeHistoryWriter(): TradeHistoryWriter {
+    return this.tradeHistory;
+  }
+
+  /**
+   * Get WebSocket connection health
+   */
+  public getWebSocketHealth(): { binance: boolean; polymarket: boolean } {
+    return {
+      binance: this.binanceClient.isConnected(),
+      polymarket: this.polymarketWs.isConnected(),
+    };
   }
 
   /**

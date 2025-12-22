@@ -38,7 +38,7 @@ export class BinanceWebSocketClient extends EventEmitter {
   private reconnectDelay: number = 1000;
   private isConnecting: boolean = false;
   private shouldReconnect: boolean = true;
-  private pingInterval: NodeJS.Timeout | null = null;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
 
   // Price data storage - last 60 seconds of prices per asset
   private priceData: Map<CryptoAsset, CryptoPriceData> = new Map();
