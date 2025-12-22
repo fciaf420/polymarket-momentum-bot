@@ -76,6 +76,10 @@ export class MomentumLagStrategy extends EventEmitter {
   // Validation chain tracking (for dashboard)
   private validationState: Map<CryptoAsset, AssetValidation> = new Map();
 
+  // Execution tracking to prevent signal spam
+  private pendingExecutions: Set<string> = new Set(); // conditionIds with in-flight orders
+  private failedMarkets: Map<string, number> = new Map(); // conditionId -> cooldown until timestamp
+
   constructor(config: Config) {
     super();
     this.config = config;
@@ -731,6 +735,39 @@ export class MomentumLagStrategy extends EventEmitter {
    * Execute a trading signal
    */
   private async executeSignal(signal: Signal): Promise<void> {
+    const conditionId = signal.market.conditionId;
+
+    // Check MAX_POSITIONS limit
+    if (this.state.positions.size >= this.config.maxPositions) {
+      logger.debug('Skipping signal - max positions reached', {
+        current: this.state.positions.size,
+        max: this.config.maxPositions,
+      });
+      return;
+    }
+
+    // Check if already have a position in this market
+    if (this.state.positions.has(conditionId)) {
+      logger.debug('Skipping signal - already have position in this market');
+      return;
+    }
+
+    // Check if execution is already in progress for this market
+    if (this.pendingExecutions.has(conditionId)) {
+      logger.debug('Skipping signal - execution already in progress');
+      return;
+    }
+
+    // Check if market is on cooldown after failure
+    const cooldownUntil = this.failedMarkets.get(conditionId);
+    if (cooldownUntil && Date.now() < cooldownUntil) {
+      logger.debug('Skipping signal - market on cooldown after failure');
+      return;
+    }
+
+    // Mark as executing
+    this.pendingExecutions.add(conditionId);
+
     try {
       // Calculate position size
       const positionValue = this.state.accountBalance * this.config.positionSizePct;
@@ -751,8 +788,13 @@ export class MomentumLagStrategy extends EventEmitter {
 
       if (order.status === 'failed') {
         logger.error('Failed to execute signal', { signal: signal.id });
+        // Add 30 second cooldown for this market
+        this.failedMarkets.set(conditionId, Date.now() + 30000);
         return;
       }
+
+      // Clear any previous failure cooldown on success
+      this.failedMarkets.delete(conditionId);
 
       // Create position
       const position: Position = {
@@ -772,7 +814,7 @@ export class MomentumLagStrategy extends EventEmitter {
         status: 'open',
       };
 
-      this.state.positions.set(signal.market.conditionId, position);
+      this.state.positions.set(conditionId, position);
 
       logTrade({
         action: 'ENTRY',
@@ -789,6 +831,11 @@ export class MomentumLagStrategy extends EventEmitter {
         signal: signal.id,
         error: (error as Error).message,
       });
+      // Add 30 second cooldown for this market on error
+      this.failedMarkets.set(conditionId, Date.now() + 30000);
+    } finally {
+      // Always remove from pending executions
+      this.pendingExecutions.delete(conditionId);
     }
   }
 
