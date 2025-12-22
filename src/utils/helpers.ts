@@ -110,18 +110,24 @@ export function probabilityToPrice(probability: number): number {
  *
  * The gap represents the mispricing: when crypto moves, the market prices
  * should adjust quickly. If they lag, we can exploit the difference.
+ *
+ * @param cryptoMovePercent - The percentage move in crypto price (e.g., 0.001 = 0.1%)
+ * @param upImpliedProb - Current UP market probability (0-1)
+ * @param downImpliedProb - Current DOWN market probability (0-1)
+ * @param moveThreshold - Minimum move to consider (from MOVE_THRESHOLD env, e.g., 0.001 = 0.1%)
  */
 export function calculatePriceGap(
   cryptoMovePercent: number,
   upImpliedProb: number,
-  downImpliedProb: number
+  downImpliedProb: number,
+  moveThreshold: number
 ): { gap: number; direction: MarketDirection; tokenSide: 'up' | 'down' } {
   // If crypto moved up, "Up" shares should be expensive, "Down" cheap
   // If crypto moved down, "Down" shares should be expensive, "Up" cheap
 
   const absMove = Math.abs(cryptoMovePercent);
 
-  if (cryptoMovePercent > 0.01) {
+  if (cryptoMovePercent > moveThreshold) {
     // Crypto went up significantly - "Up" shares should be expensive (> 0.55)
     // If "Up" is still cheap (near 0.5), there's a lag - buy UP shares
     const expectedUpPrice = Math.min(0.5 + absMove * 5, 0.95);
@@ -135,7 +141,7 @@ export function calculatePriceGap(
         tokenSide: 'up', // Buy "Up" shares which are underpriced
       };
     }
-  } else if (cryptoMovePercent < -0.01) {
+  } else if (cryptoMovePercent < -moveThreshold) {
     // Crypto went down significantly - "Down" shares should be expensive
     // If "Down" is still cheap (near 0.5), there's a lag - buy DOWN shares
     const expectedDownPrice = Math.min(0.5 + absMove * 5, 0.95);

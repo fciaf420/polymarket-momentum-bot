@@ -592,7 +592,8 @@ export class MomentumLagStrategy extends EventEmitter {
           const gapResult = calculatePriceGap(
             move.movePercent,
             marketData.upImpliedProb,
-            marketData.downImpliedProb
+            marketData.downImpliedProb,
+            this.config.moveThreshold
           );
 
           const absMove = Math.abs(move.movePercent);
@@ -841,7 +842,8 @@ export class MomentumLagStrategy extends EventEmitter {
       const currentGap = calculatePriceGap(
         position.signal.priceMove.movePercent,
         marketData.upImpliedProb,
-        marketData.downImpliedProb
+        marketData.downImpliedProb,
+        this.config.moveThreshold
       );
 
       if (currentGap.gap < this.config.exitGapThreshold) {

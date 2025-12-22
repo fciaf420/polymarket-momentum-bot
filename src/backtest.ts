@@ -327,7 +327,7 @@ export class Backtester {
 
         // Calculate current gap
         const recentMove = this.calculateRecentMove(priceHistory);
-        const gapResult = calculatePriceGap(recentMove, point.upPrice, point.downPrice);
+        const gapResult = calculatePriceGap(recentMove, point.upPrice, point.downPrice, this.config.moveThreshold);
 
         // Exit conditions
         let shouldExit = false;
@@ -397,7 +397,7 @@ export class Backtester {
       }
 
       // Calculate gap
-      const gapResult = calculatePriceGap(move.movePercent, point.upPrice, point.downPrice);
+      const gapResult = calculatePriceGap(move.movePercent, point.upPrice, point.downPrice, this.config.moveThreshold);
 
       // Debug: Log first few signals found
       if (this.tradeHistory.length === 0 && position === null) {
