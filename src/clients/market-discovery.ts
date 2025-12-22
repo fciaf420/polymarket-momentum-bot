@@ -388,14 +388,14 @@ export class MarketDiscoveryClient {
 
   /**
    * Check if expiry time is valid for trading
-   * Only want the next 1-2 markets (expiring in 2-20 minutes)
+   * Must have at least 2 min until expiry to safely enter a position
    */
   private isValidExpiry(expiryTime: Date): boolean {
     const now = Date.now();
     const timeToExpiry = expiryTime.getTime() - now;
 
-    // Must expire in 2-14 minutes (need at least 2 min to trade, max 14 min for 12-min hold + buffer)
-    return timeToExpiry >= 2 * 60 * 1000 && timeToExpiry <= 14 * 60 * 1000;
+    // Must have at least 2 min until expiry (hardcoded safety minimum)
+    return timeToExpiry >= 2 * 60 * 1000;
   }
 
   /**
