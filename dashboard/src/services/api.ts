@@ -1,6 +1,13 @@
-import type { DashboardState, TradeRecord } from '../types';
+import type { DashboardState, TradeRecord, TradingConfig } from '../types';
 
 const API_BASE = '/api';
+
+export interface ConfigUpdateResponse {
+  success: boolean;
+  config?: TradingConfig;
+  errors?: string[];
+  error?: string;
+}
 
 async function fetchJSON<T>(endpoint: string): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`);
@@ -61,7 +68,11 @@ export const api = {
   getMarkets: () => fetchJSON<DashboardState['markets']>('/markets'),
 
   // Get config (sanitized)
-  getConfig: () => fetchJSON<Record<string, unknown>>('/config'),
+  getConfig: () => fetchJSON<TradingConfig>('/config'),
+
+  // Update config
+  updateConfig: (updates: Partial<TradingConfig>) =>
+    postJSON<ConfigUpdateResponse>('/config', updates as Record<string, unknown>),
 
   // Pause bot
   pause: (reason?: string) =>

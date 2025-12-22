@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { DashboardState, WSMessage, PriceUpdate, Position, Signal } from '../types';
+import type { DashboardState, WSMessage, PriceUpdate, Position, Signal, TradingConfig } from '../types';
 
 interface UseWebSocketReturn {
   state: DashboardState | null;
@@ -105,6 +105,7 @@ export function useWebSocket(url: string = '/ws'): UseWebSocketReturn {
               totalPnl: update.account.totalPnl,
               currentDrawdown: update.account.drawdown,
             },
+            validation: update.validation || prev.validation,
           };
         });
         break;
@@ -137,6 +138,16 @@ export function useWebSocket(url: string = '/ws'): UseWebSocketReturn {
           return {
             ...prev,
             signals: [newSignal, ...prev.signals.slice(0, 49)],
+          };
+        });
+        break;
+
+      case 'config_updated':
+        setState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            config: message.data as TradingConfig,
           };
         });
         break;

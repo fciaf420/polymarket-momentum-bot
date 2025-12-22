@@ -8,6 +8,7 @@ import cors from 'cors';
 import { createServer, Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 import type { Config } from '../types/index.js';
@@ -138,6 +139,77 @@ export class DashboardServer {
       res.json(config);
     });
 
+    // Update config
+    this.app.post('/api/config', (req: Request, res: Response) => {
+      try {
+        const updates = req.body as Partial<{
+          positionSizePct: number;
+          gapThreshold: number;
+          moveThreshold: number;
+          maxPositions: number;
+          minLiquidity: number;
+          maxHoldMinutes: number;
+          exitGapThreshold: number;
+          maxDrawdown: number;
+        }>;
+
+        // Validate updates
+        const errors: string[] = [];
+        if (updates.positionSizePct !== undefined && (updates.positionSizePct <= 0 || updates.positionSizePct > 1)) {
+          errors.push('positionSizePct must be between 0 and 1');
+        }
+        if (updates.gapThreshold !== undefined && (updates.gapThreshold <= 0 || updates.gapThreshold > 1)) {
+          errors.push('gapThreshold must be between 0 and 1');
+        }
+        if (updates.moveThreshold !== undefined && (updates.moveThreshold <= 0 || updates.moveThreshold > 1)) {
+          errors.push('moveThreshold must be between 0 and 1');
+        }
+        if (updates.maxPositions !== undefined && (updates.maxPositions < 1 || updates.maxPositions > 10)) {
+          errors.push('maxPositions must be between 1 and 10');
+        }
+        if (updates.minLiquidity !== undefined && updates.minLiquidity < 0) {
+          errors.push('minLiquidity must be positive');
+        }
+        if (updates.maxHoldMinutes !== undefined && (updates.maxHoldMinutes < 1 || updates.maxHoldMinutes > 14)) {
+          errors.push('maxHoldMinutes must be between 1 and 14');
+        }
+        if (updates.exitGapThreshold !== undefined && (updates.exitGapThreshold <= 0 || updates.exitGapThreshold > 1)) {
+          errors.push('exitGapThreshold must be between 0 and 1');
+        }
+        if (updates.maxDrawdown !== undefined && (updates.maxDrawdown <= 0 || updates.maxDrawdown > 1)) {
+          errors.push('maxDrawdown must be between 0 and 1');
+        }
+
+        if (errors.length > 0) {
+          res.status(400).json({ success: false, errors });
+          return;
+        }
+
+        // Update runtime config
+        if (updates.positionSizePct !== undefined) this.config.positionSizePct = updates.positionSizePct;
+        if (updates.gapThreshold !== undefined) this.config.gapThreshold = updates.gapThreshold;
+        if (updates.moveThreshold !== undefined) this.config.moveThreshold = updates.moveThreshold;
+        if (updates.maxPositions !== undefined) this.config.maxPositions = updates.maxPositions;
+        if (updates.minLiquidity !== undefined) this.config.minLiquidity = updates.minLiquidity;
+        if (updates.maxHoldMinutes !== undefined) this.config.maxHoldMinutes = updates.maxHoldMinutes;
+        if (updates.exitGapThreshold !== undefined) this.config.exitGapThreshold = updates.exitGapThreshold;
+        if (updates.maxDrawdown !== undefined) this.config.maxDrawdown = updates.maxDrawdown;
+
+        // Update .env file
+        this.updateEnvFile(updates);
+
+        // Broadcast config update to all clients
+        const newConfig = this.stateAggregator.getSanitizedConfig();
+        this.broadcast({ type: 'config_updated', data: newConfig, timestamp: Date.now() });
+
+        logger.info('Config updated from dashboard', { updates });
+        res.json({ success: true, config: newConfig });
+      } catch (error) {
+        logger.error('Failed to update config', { error: (error as Error).message });
+        res.status(500).json({ success: false, error: (error as Error).message });
+      }
+    });
+
     // Get full state
     this.app.get('/api/state', (_req: Request, res: Response) => {
       const state = this.stateAggregator.getState();
@@ -266,6 +338,7 @@ export class DashboardServer {
             totalPnl: state.account.totalPnl,
             drawdown: state.account.currentDrawdown,
           },
+          validation: state.validation,
         },
         timestamp: Date.now(),
       });
@@ -329,6 +402,52 @@ export class DashboardServer {
         resolve();
       });
     });
+  }
+
+  /**
+   * Update .env file with new config values
+   */
+  private updateEnvFile(updates: Record<string, unknown>): void {
+    const envPath = path.join(process.cwd(), '.env');
+
+    if (!fs.existsSync(envPath)) {
+      logger.warn('.env file not found, skipping file update');
+      return;
+    }
+
+    let envContent = fs.readFileSync(envPath, 'utf-8');
+
+    // Map config keys to env variable names
+    const keyMap: Record<string, string> = {
+      positionSizePct: 'POSITION_SIZE_PCT',
+      gapThreshold: 'GAP_THRESHOLD',
+      moveThreshold: 'MOVE_THRESHOLD',
+      maxPositions: 'MAX_POSITIONS',
+      minLiquidity: 'MIN_LIQUIDITY',
+      maxHoldMinutes: 'MAX_HOLD_MINUTES',
+      exitGapThreshold: 'EXIT_GAP_THRESHOLD',
+      maxDrawdown: 'MAX_DRAWDOWN',
+    };
+
+    for (const [key, value] of Object.entries(updates)) {
+      const envKey = keyMap[key];
+      if (!envKey) continue;
+
+      // Regex to match the line with this key
+      const regex = new RegExp(`^${envKey}=.*$`, 'm');
+      const newLine = `${envKey}=${value}`;
+
+      if (regex.test(envContent)) {
+        // Replace existing line
+        envContent = envContent.replace(regex, newLine);
+      } else {
+        // Append new line
+        envContent += `\n${newLine}`;
+      }
+    }
+
+    fs.writeFileSync(envPath, envContent, 'utf-8');
+    logger.info('.env file updated', { updates: Object.keys(updates) });
   }
 }
 

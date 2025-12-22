@@ -114,6 +114,37 @@ export interface RiskLimits {
   minLiquidity: number;
 }
 
+export interface TradingConfig {
+  positionSizePct: number;
+  gapThreshold: number;
+  moveThreshold: number;
+  maxPositions: number;
+  minLiquidity: number;
+  maxHoldMinutes: number;
+  exitGapThreshold: number;
+  maxDrawdown: number;
+  backtest: boolean;
+  dryRun: boolean;
+}
+
+export type ValidationCheckStatus = 'passed' | 'failed' | 'skipped';
+
+export interface ValidationCheck {
+  name: string;
+  status: ValidationCheckStatus;
+  value?: string;
+  threshold?: string;
+  reason?: string;
+}
+
+export interface AssetValidation {
+  asset: CryptoAsset;
+  timestamp: number;
+  checks: ValidationCheck[];
+  finalResult: 'signal_triggered' | 'blocked' | 'no_opportunity';
+  blockReason?: string;
+}
+
 export interface DashboardState {
   status: {
     isRunning: boolean;
@@ -147,6 +178,8 @@ export interface DashboardState {
   trades: {
     summary: TradeSummary;
   };
+  config: TradingConfig;
+  validation: AssetValidation[];
 }
 
 export interface WSMessage {
@@ -181,4 +214,5 @@ export interface PriceUpdate {
     totalPnl: number;
     drawdown: number;
   };
+  validation: AssetValidation[];
 }

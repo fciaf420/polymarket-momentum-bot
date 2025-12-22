@@ -16,6 +16,8 @@ import type {
   PriceMove,
   TradeRecord,
   ExitReason,
+  AssetValidation,
+  ValidationCheck,
 } from './types/index.js';
 import {
   BinanceWebSocketClient,
@@ -70,6 +72,9 @@ export class MomentumLagStrategy extends EventEmitter {
   // Monitoring intervals
   private scanInterval: ReturnType<typeof setInterval> | null = null;
   private positionMonitorInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Validation chain tracking (for dashboard)
+  private validationState: Map<CryptoAsset, AssetValidation> = new Map();
 
   constructor(config: Config) {
     super();
@@ -272,16 +277,27 @@ export class MomentumLagStrategy extends EventEmitter {
           liquidityDown: 0,
         };
 
+        const tokenType = market.upTokenId === assetId ? 'UP' : 'DOWN';
+        const normalizedPrice = normalizeSharePrice(price);
+
         if (market.upTokenId === assetId) {
-          existing.upPrice = normalizeSharePrice(price);
+          existing.upPrice = normalizedPrice;
           existing.upImpliedProb = existing.upPrice;
         } else {
-          existing.downPrice = normalizeSharePrice(price);
+          existing.downPrice = normalizedPrice;
           existing.downImpliedProb = existing.downPrice;
         }
 
         existing.timestamp = timestamp;
         this.marketPrices.set(conditionId, existing);
+
+        // Log WS price updates to diagnose 50/50 issue
+        logger.debug('WS price update', {
+          asset: market.asset,
+          tokenType,
+          newPrice: (normalizedPrice * 100).toFixed(1) + '%',
+          tokenId: assetId.substring(0, 16) + '...',
+        });
         break;
       }
     }
@@ -342,8 +358,10 @@ export class MomentumLagStrategy extends EventEmitter {
 
       logger.info('Market prices initialized', {
         asset: market.asset,
-        upPrice: upPrice.toFixed(2),
-        downPrice: downPrice.toFixed(2),
+        upPrice: (upPrice * 100).toFixed(1) + '%',
+        downPrice: (downPrice * 100).toFixed(1) + '%',
+        upTokenId: market.upTokenId.substring(0, 16) + '...',
+        downTokenId: market.downTokenId.substring(0, 16) + '...',
       });
 
       // Subscribe to market data for real-time updates
@@ -381,108 +399,292 @@ export class MomentumLagStrategy extends EventEmitter {
    * Scan for trading opportunities
    */
   private scanForOpportunities(): void {
-    // Check if we can take new positions
-    if (this.state.positions.size >= this.config.maxPositions) {
-      return;
-    }
-
-    // Check drawdown
-    if (this.checkDrawdown()) {
-      return;
-    }
-
-    // Scan each asset for hard moves
     const assets: CryptoAsset[] = ['BTC', 'ETH', 'SOL', 'XRP'];
 
+    // Global checks first
+    const maxPositionsReached = this.state.positions.size >= this.config.maxPositions;
+    const drawdownHit = this.checkDrawdown();
+
     for (const asset of assets) {
+      const checks: ValidationCheck[] = [];
+      let blocked = false;
+      let blockReason = '';
+
+      // CHECK 1: Max positions
+      if (maxPositionsReached) {
+        checks.push({
+          name: 'Max Positions',
+          status: 'failed',
+          value: `${this.state.positions.size}`,
+          threshold: `${this.config.maxPositions}`,
+          reason: 'At maximum concurrent positions',
+        });
+        blocked = true;
+        blockReason = 'Max positions reached';
+      } else {
+        checks.push({
+          name: 'Max Positions',
+          status: 'passed',
+          value: `${this.state.positions.size}`,
+          threshold: `${this.config.maxPositions}`,
+        });
+      }
+
+      // CHECK 2: Drawdown
+      if (!blocked && drawdownHit) {
+        checks.push({
+          name: 'Drawdown',
+          status: 'failed',
+          value: formatPercent(this.state.currentDrawdown),
+          threshold: formatPercent(this.config.maxDrawdown),
+          reason: 'Max drawdown exceeded',
+        });
+        blocked = true;
+        blockReason = 'Max drawdown exceeded';
+      } else if (!blocked) {
+        checks.push({
+          name: 'Drawdown',
+          status: 'passed',
+          value: formatPercent(this.state.currentDrawdown),
+          threshold: formatPercent(this.config.maxDrawdown),
+        });
+      } else {
+        checks.push({ name: 'Drawdown', status: 'skipped' });
+      }
+
+      // CHECK 3: Price data available
       const priceData = this.cryptoPrices.get(asset);
-      if (!priceData || priceData.priceHistory.length < 10) {
-        continue;
+      if (!blocked && (!priceData || priceData.priceHistory.length < 10)) {
+        checks.push({
+          name: 'Price Data',
+          status: 'failed',
+          value: priceData ? `${priceData.priceHistory.length} points` : 'none',
+          threshold: '10+ points',
+          reason: 'Insufficient price history',
+        });
+        blocked = true;
+        blockReason = 'No price data';
+      } else if (!blocked) {
+        checks.push({
+          name: 'Price Data',
+          status: 'passed',
+          value: `${priceData!.priceHistory.length} points`,
+        });
+      } else {
+        checks.push({ name: 'Price Data', status: 'skipped' });
       }
 
-      // Detect hard move
-      const move = detectHardMove(
-        priceData.priceHistory,
-        asset,
-        this.config.moveThreshold,
-        60, // 1 minute window
-        this.config.bbPeriod
-      );
-
-      if (!move) {
-        continue;
-      }
-
-      // Check for volatility squeeze before the move (better signals)
-      const hadSqueeze = move.volatilityBefore.isSqueezing;
-
-      // Find matching markets for this asset
-      const markets = Array.from(this.activeMarkets.values()).filter(m => m.asset === asset);
-
-      for (const market of markets) {
-        // Skip if we already have a position in this market
-        if (this.state.positions.has(market.conditionId)) {
-          continue;
-        }
-
-        // Get market prices
-        const marketData = this.marketPrices.get(market.conditionId);
-        if (!marketData) {
-          continue;
-        }
-
-        // Calculate gap
-        const gapResult = calculatePriceGap(
-          move.movePercent,
-          marketData.upImpliedProb,
-          marketData.downImpliedProb
+      // CHECK 4: Hard move detection
+      let move: PriceMove | null = null;
+      if (!blocked && priceData) {
+        move = detectHardMove(
+          priceData.priceHistory,
+          asset,
+          this.config.moveThreshold,
+          60,
+          this.config.bbPeriod
         );
 
-        if (gapResult.gap < this.config.gapThreshold) {
-          continue;
-        }
-
-        // Check liquidity
-        const liquidity = gapResult.tokenSide === 'up' ? marketData.liquidityUp : marketData.liquidityDown;
-        if (liquidity < this.config.minLiquidity) {
-          logger.debug('Skipping signal due to low liquidity', {
-            asset,
-            liquidity: formatCurrency(liquidity),
-            required: formatCurrency(this.config.minLiquidity),
+        if (!move) {
+          checks.push({
+            name: 'Hard Move',
+            status: 'failed',
+            value: 'No move detected',
+            threshold: formatPercent(this.config.moveThreshold),
+            reason: 'Price not moving enough',
           });
-          continue;
+          blocked = true;
+          blockReason = 'No hard move detected';
+        } else {
+          checks.push({
+            name: 'Hard Move',
+            status: 'passed',
+            value: `${move.direction} ${formatPercent(Math.abs(move.movePercent))}`,
+            threshold: formatPercent(this.config.moveThreshold),
+          });
+        }
+      } else {
+        checks.push({ name: 'Hard Move', status: 'skipped' });
+      }
+
+      // CHECK 5: Active market exists
+      const markets = Array.from(this.activeMarkets.values()).filter(m => m.asset === asset);
+      if (!blocked && markets.length === 0) {
+        checks.push({
+          name: 'Active Market',
+          status: 'failed',
+          value: '0 markets',
+          reason: 'No active 15m market',
+        });
+        blocked = true;
+        blockReason = 'No active market';
+      } else if (!blocked) {
+        checks.push({
+          name: 'Active Market',
+          status: 'passed',
+          value: `${markets.length} market(s)`,
+        });
+      } else {
+        checks.push({ name: 'Active Market', status: 'skipped' });
+      }
+
+      // Process first active market only (one per asset)
+      let signalTriggered = false;
+      if (!blocked && move && markets.length > 0) {
+        const hadSqueeze = move.volatilityBefore.isSqueezing;
+        const market = markets[0]; // Use first active market
+
+        // CHECK 6: No existing position
+        if (this.state.positions.has(market.conditionId)) {
+          checks.push({
+            name: 'No Existing Position',
+            status: 'failed',
+            reason: 'Already have position in this market',
+          });
+          blockReason = 'Already have position';
+          blocked = true;
+        } else {
+          checks.push({ name: 'No Existing Position', status: 'passed' });
         }
 
-        // Calculate confidence
-        const confidence = this.calculateSignalConfidence(move, gapResult.gap, hadSqueeze, liquidity);
+        // CHECK 7: Market data available
+        const marketData = !blocked ? this.marketPrices.get(market.conditionId) : null;
 
-        // Create signal
-        const signal: Signal = {
-          id: generateId(),
-          timestamp: Date.now(),
-          asset,
-          market,
-          priceMove: move,
-          gapPercent: gapResult.gap,
-          suggestedSide: gapResult.direction,
-          tokenId: gapResult.tokenSide === 'up' ? market.upTokenId : market.downTokenId,
-          entryPrice: gapResult.tokenSide === 'up' ? marketData.upPrice : marketData.downPrice,
-          liquidity,
-          confidence,
-          reason: `${asset} ${move.direction} ${formatPercent(Math.abs(move.movePercent))} in ${move.durationSeconds.toFixed(0)}s, gap ${formatPercent(gapResult.gap)}${hadSqueeze ? ' (post-squeeze)' : ''}`,
-        };
+        // Debug: Log raw market data values to verify they're correct
+        if (marketData) {
+          logger.debug('Market data values', {
+            asset,
+            upPrice: marketData.upPrice.toFixed(4),
+            downPrice: marketData.downPrice.toFixed(4),
+            upImpliedProb: marketData.upImpliedProb.toFixed(4),
+            downImpliedProb: marketData.downImpliedProb.toFixed(4),
+            movePercent: move ? (move.movePercent * 100).toFixed(2) + '%' : 'N/A',
+          });
+        }
 
-        logSignal({
-          asset: signal.asset,
-          direction: signal.suggestedSide,
-          gap: signal.gapPercent,
-          confidence: signal.confidence,
-          market: market.marketSlug,
-        });
+        if (!blocked && !marketData) {
+          checks.push({
+            name: 'Market Data',
+            status: 'failed',
+            reason: 'No market price data',
+          });
+          blockReason = 'No market price data';
+          blocked = true;
+        } else if (!blocked && marketData) {
+          checks.push({
+            name: 'Market Data',
+            status: 'passed',
+            value: `UP ${formatPercent(marketData.upPrice)} / DN ${formatPercent(marketData.downPrice)}`,
+          });
 
-        // Execute trade
-        this.executeSignal(signal);
+          // CHECK 8: Gap threshold
+          logger.debug('Gap calc inputs', {
+            asset,
+            movePercent: (move.movePercent * 100).toFixed(2) + '%',
+            moveDirection: move.direction,
+            upImpliedProb: (marketData.upImpliedProb * 100).toFixed(1) + '%',
+            downImpliedProb: (marketData.downImpliedProb * 100).toFixed(1) + '%',
+          });
+
+          const gapResult = calculatePriceGap(
+            move.movePercent,
+            marketData.upImpliedProb,
+            marketData.downImpliedProb
+          );
+
+          const absMove = Math.abs(move.movePercent);
+          const expectedPrice = Math.min(0.5 + absMove * 5, 0.95);
+          const currentProb = move.direction === 'up' ? marketData.upImpliedProb : marketData.downImpliedProb;
+          const rawGap = expectedPrice - currentProb;
+
+          logger.debug('Gap calc result', {
+            asset,
+            expectedPrice: (expectedPrice * 100).toFixed(1) + '%',
+            currentProb: (currentProb * 100).toFixed(1) + '%',
+            rawGap: (rawGap * 100).toFixed(1) + '%',
+            finalGap: (gapResult.gap * 100).toFixed(1) + '%',
+            threshold: (this.config.gapThreshold * 100).toFixed(1) + '%',
+          });
+
+          if (gapResult.gap < this.config.gapThreshold) {
+            checks.push({
+              name: 'Gap Threshold',
+              status: 'failed',
+              value: formatPercent(gapResult.gap),
+              threshold: formatPercent(this.config.gapThreshold),
+              reason: `Move ${formatPercent(move.movePercent)} → Exp ${formatPercent(expectedPrice)} vs Mkt ${formatPercent(currentProb)} = ${formatPercent(rawGap)}`,
+            });
+            blockReason = `Gap ${formatPercent(gapResult.gap)} < ${formatPercent(this.config.gapThreshold)}`;
+            blocked = true;
+          } else {
+            checks.push({
+              name: 'Gap Threshold',
+              status: 'passed',
+              value: formatPercent(gapResult.gap),
+              threshold: formatPercent(this.config.gapThreshold),
+            });
+
+            // CHECK 9: Liquidity
+            const liquidity = gapResult.tokenSide === 'up' ? marketData.liquidityUp : marketData.liquidityDown;
+            if (liquidity < this.config.minLiquidity) {
+              checks.push({
+                name: 'Liquidity',
+                status: 'failed',
+                value: formatCurrency(liquidity),
+                threshold: formatCurrency(this.config.minLiquidity),
+                reason: 'Insufficient liquidity',
+              });
+              blockReason = `Liquidity $${liquidity.toFixed(0)} < $${this.config.minLiquidity}`;
+              blocked = true;
+            } else {
+              checks.push({
+                name: 'Liquidity',
+                status: 'passed',
+                value: formatCurrency(liquidity),
+                threshold: formatCurrency(this.config.minLiquidity),
+              });
+
+              // ALL CHECKS PASSED - Create and execute signal
+              const confidence = this.calculateSignalConfidence(move, gapResult.gap, hadSqueeze, liquidity);
+
+              const signal: Signal = {
+                id: generateId(),
+                timestamp: Date.now(),
+                asset,
+                market,
+                priceMove: move,
+                gapPercent: gapResult.gap,
+                suggestedSide: gapResult.direction,
+                tokenId: gapResult.tokenSide === 'up' ? market.upTokenId : market.downTokenId,
+                entryPrice: gapResult.tokenSide === 'up' ? marketData.upPrice : marketData.downPrice,
+                liquidity,
+                confidence,
+                reason: `${asset} ${move.direction} ${formatPercent(Math.abs(move.movePercent))} in ${move.durationSeconds.toFixed(0)}s, gap ${formatPercent(gapResult.gap)}${hadSqueeze ? ' (post-squeeze)' : ''}`,
+              };
+
+              logSignal({
+                asset: signal.asset,
+                direction: signal.suggestedSide,
+                gap: signal.gapPercent,
+                confidence: signal.confidence,
+                market: market.marketSlug,
+              });
+
+              this.executeSignal(signal);
+              signalTriggered = true;
+            }
+          }
+        }
       }
+
+      // Update validation state for this asset
+      this.validationState.set(asset, {
+        asset,
+        timestamp: Date.now(),
+        checks,
+        finalResult: signalTriggered ? 'signal_triggered' : (blocked ? 'blocked' : 'no_opportunity'),
+        blockReason: blocked ? blockReason : undefined,
+      });
     }
   }
 
@@ -862,6 +1064,13 @@ export class MomentumLagStrategy extends EventEmitter {
    */
   public getActiveMarkets(): CryptoMarket[] {
     return Array.from(this.activeMarkets.values());
+  }
+
+  /**
+   * Get validation state (for dashboard)
+   */
+  public getValidationState(): AssetValidation[] {
+    return Array.from(this.validationState.values());
   }
 
   /**

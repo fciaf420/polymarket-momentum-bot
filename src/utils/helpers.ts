@@ -127,7 +127,8 @@ export function calculatePriceGap(
     const expectedUpPrice = Math.min(0.5 + absMove * 5, 0.95);
     const gap = expectedUpPrice - upImpliedProb;
 
-    if (gap > 0.03) {
+    // Return positive gap (let config.gapThreshold filter in strategy)
+    if (gap > 0) {
       return {
         gap,
         direction: 'UP',
@@ -140,7 +141,8 @@ export function calculatePriceGap(
     const expectedDownPrice = Math.min(0.5 + absMove * 5, 0.95);
     const gap = expectedDownPrice - downImpliedProb;
 
-    if (gap > 0.03) {
+    // Return positive gap (let config.gapThreshold filter in strategy)
+    if (gap > 0) {
       return {
         gap,
         direction: 'DOWN',

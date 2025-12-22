@@ -10,6 +10,8 @@ import {
   PriceMonitor,
   TradeHistory,
 } from './components';
+import { ConfigBanner } from './components/ConfigBanner';
+import { ValidationChain } from './components/ValidationChain';
 import { Loader2 } from 'lucide-react';
 
 function App() {
@@ -64,11 +66,19 @@ function App() {
         onResume={handleResume}
       />
 
+      {/* Config Banner - Editable settings */}
+      <ConfigBanner config={state.config} />
+
       {/* Main Content */}
       <main className="p-6">
         {/* Account Stats Row */}
         <section className="mb-6">
           <AccountStats state={state} />
+        </section>
+
+        {/* Validation Chain - Real-time signal checks */}
+        <section className="mb-6">
+          <ValidationChain validation={state.validation} />
         </section>
 
         {/* Main Grid */}

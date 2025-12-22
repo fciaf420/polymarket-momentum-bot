@@ -13,6 +13,7 @@ import type {
   MarketPriceData,
   CryptoMarket,
   TradeRecord,
+  AssetValidation,
 } from '../types/index.js';
 
 export interface DashboardState {
@@ -73,6 +74,19 @@ export interface DashboardState {
       worstTrade: number;
     };
   };
+  config: {
+    positionSizePct: number;
+    gapThreshold: number;
+    moveThreshold: number;
+    maxPositions: number;
+    minLiquidity: number;
+    maxHoldMinutes: number;
+    exitGapThreshold: number;
+    maxDrawdown: number;
+    backtest: boolean;
+    dryRun: boolean;
+  };
+  validation: AssetValidation[];
 }
 
 export class DashboardStateAggregator {
@@ -170,6 +184,19 @@ export class DashboardStateAggregator {
       trades: {
         summary: tradeSummary,
       },
+      config: {
+        positionSizePct: this.config.positionSizePct,
+        gapThreshold: this.config.gapThreshold,
+        moveThreshold: this.config.moveThreshold,
+        maxPositions: this.config.maxPositions,
+        minLiquidity: this.config.minLiquidity,
+        maxHoldMinutes: this.config.maxHoldMinutes,
+        exitGapThreshold: this.config.exitGapThreshold,
+        maxDrawdown: this.config.maxDrawdown,
+        backtest: this.config.backtest,
+        dryRun: this.config.dryRun,
+      },
+      validation: this.strategy.getValidationState(),
     };
   }
 

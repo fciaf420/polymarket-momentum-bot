@@ -129,6 +129,28 @@ export interface Signal {
 }
 
 // ===========================================
+// Validation Chain Types
+// ===========================================
+
+export type ValidationCheckStatus = 'passed' | 'failed' | 'skipped';
+
+export interface ValidationCheck {
+  name: string;
+  status: ValidationCheckStatus;
+  value?: string;
+  threshold?: string;
+  reason?: string;
+}
+
+export interface AssetValidation {
+  asset: CryptoAsset;
+  timestamp: number;
+  checks: ValidationCheck[];
+  finalResult: 'signal_triggered' | 'blocked' | 'no_opportunity';
+  blockReason?: string;
+}
+
+// ===========================================
 // Position Types
 // ===========================================
 

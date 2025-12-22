@@ -9,7 +9,15 @@ interface PriceMonitorProps {
   markets: DashboardState['markets'];
 }
 
-const ASSET_ICONS: Record<CryptoAsset, string> = {
+// Crypto logo URLs from CoinGecko CDN
+const ASSET_LOGOS: Record<CryptoAsset, string> = {
+  BTC: 'https://assets.coingecko.com/coins/images/1/small/bitcoin.png',
+  ETH: 'https://assets.coingecko.com/coins/images/279/small/ethereum.png',
+  SOL: 'https://assets.coingecko.com/coins/images/4128/small/solana.png',
+  XRP: 'https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png',
+};
+
+const ASSET_COLORS: Record<CryptoAsset, string> = {
   BTC: 'orange',
   ETH: 'purple',
   SOL: 'cyan',
@@ -80,7 +88,8 @@ export function PriceMonitor({ prices, markets }: PriceMonitorProps) {
         {assets.map((asset) => {
           const cryptoPrice = prices.crypto[asset];
           const assetMarkets = markets.filter((m) => m.asset === asset);
-          const color = ASSET_ICONS[asset];
+          const color = ASSET_COLORS[asset];
+          const logo = ASSET_LOGOS[asset];
 
           // Get the main market odds for this asset (first available market)
           const mainMarket = assetMarkets[0];
@@ -94,14 +103,24 @@ export function PriceMonitor({ prices, markets }: PriceMonitorProps) {
           return (
             <div key={asset} className="border border-slate-700 rounded-lg p-3">
               <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center bg-${color}-500/20`}
+                    className={`w-10 h-10 rounded-full flex items-center justify-center bg-${color}-500/20 p-1.5`}
                   >
-                    <span className={`text-${color}-400 font-bold text-sm`}>{asset}</span>
+                    <img
+                      src={logo}
+                      alt={asset}
+                      className="w-full h-full object-contain"
+                      onError={(e) => {
+                        // Fallback to text if image fails to load
+                        e.currentTarget.style.display = 'none';
+                        e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                      }}
+                    />
+                    <span className={`text-${color}-400 font-bold text-sm hidden`}>{asset}</span>
                   </div>
                   <div>
-                    <p className="font-bold text-white">{asset}</p>
+                    <p className="font-bold text-white text-lg">{asset}</p>
                     <p className="text-xs text-slate-400">
                       <Clock className="h-3 w-3 inline mr-1" />
                       {cryptoPrice && formatDistanceToNow(cryptoPrice.timestamp, { addSuffix: true })}

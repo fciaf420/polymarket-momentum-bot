@@ -164,25 +164,31 @@ export class MarketDiscoveryClient {
       // Filter for tradeable markets
       const tradeableMarkets = uniqueMarkets.filter(m => this.isMarketTradeable(m));
 
+      // Fetch LIVE prices from CLOB API (Gamma API prices are stale!)
+      logger.info('Fetching live prices from CLOB API...');
+      const marketsWithLivePrices = await Promise.all(
+        tradeableMarkets.map(market => this.refreshMarketPrices(market))
+      );
+
       // Update active markets map
       const previousCount = this.activeMarkets.size;
       this.activeMarkets.clear();
 
-      for (const market of tradeableMarkets) {
+      for (const market of marketsWithLivePrices) {
         this.activeMarkets.set(market.conditionId, market);
       }
 
-      logger.info('Markets refreshed', {
-        sources: 'Gamma Series API',
+      logger.info('Markets refreshed with live prices', {
+        sources: 'Gamma Series + CLOB Midpoint API',
         total: allMarkets.length,
         unique: uniqueMarkets.length,
-        tradeable: tradeableMarkets.length,
+        tradeable: marketsWithLivePrices.length,
         previousCount,
       });
 
       // Notify callback
-      if (this.onMarketsUpdate && tradeableMarkets.length > 0) {
-        this.onMarketsUpdate(tradeableMarkets);
+      if (this.onMarketsUpdate && marketsWithLivePrices.length > 0) {
+        this.onMarketsUpdate(marketsWithLivePrices);
       }
 
     } catch (error) {
@@ -310,12 +316,13 @@ export class MarketDiscoveryClient {
       prices = JSON.parse(market.outcomePrices || '[]');
       tokenIds = JSON.parse(market.clobTokenIds || '[]');
 
-      // Log parsed data for debugging
-      logger.debug('Parsed market data', {
+      // Log parsed data for debugging - use info level to diagnose 50/50 issue
+      logger.info('Market prices from API', {
+        asset,
         question: market.question.substring(0, 40),
+        rawOutcomePrices: market.outcomePrices,
+        parsedPrices: prices,
         outcomes,
-        prices,
-        outcomePricesRaw: market.outcomePrices,
       });
     } catch (e) {
       logger.debug('Failed to parse market JSON fields', { error: (e as Error).message });
@@ -487,6 +494,60 @@ export class MarketDiscoveryClient {
       logger.error('Failed to get historical prices', { tokenId, error: (error as Error).message });
       return [];
     }
+  }
+
+  /**
+   * Fetch LIVE prices from CLOB API /midpoint endpoint
+   * This returns the current mid-price (average of best bid/ask)
+   * Much more accurate than Gamma API's stale outcomePrices
+   */
+  public async getLivePrices(upTokenId: string, downTokenId: string): Promise<{ upPrice: number; downPrice: number } | null> {
+    try {
+      // Fetch midpoints for both UP and DOWN tokens in parallel
+      const [upResponse, downResponse] = await Promise.all([
+        this.clobClient.get('/midpoint', { params: { token_id: upTokenId } }),
+        this.clobClient.get('/midpoint', { params: { token_id: downTokenId } }),
+      ]);
+
+      const upPrice = parseFloat(upResponse.data?.mid || '0.5');
+      const downPrice = parseFloat(downResponse.data?.mid || '0.5');
+
+      logger.debug('Live prices fetched from CLOB API', {
+        upPrice: (upPrice * 100).toFixed(1) + '%',
+        downPrice: (downPrice * 100).toFixed(1) + '%',
+      });
+
+      return { upPrice, downPrice };
+    } catch (error) {
+      logger.warn('Failed to fetch live prices from CLOB API', { error: (error as Error).message });
+      return null;
+    }
+  }
+
+  /**
+   * Fetch live prices for a market and update its token prices
+   */
+  public async refreshMarketPrices(market: CryptoMarket): Promise<CryptoMarket> {
+    const livePrices = await this.getLivePrices(market.upTokenId, market.downTokenId);
+
+    if (livePrices) {
+      // Update token prices with live data
+      for (const token of market.tokens) {
+        if (token.tokenId === market.upTokenId) {
+          token.price = livePrices.upPrice;
+        } else if (token.tokenId === market.downTokenId) {
+          token.price = livePrices.downPrice;
+        }
+      }
+
+      logger.info('Market prices updated with live data', {
+        asset: market.asset,
+        upPrice: (livePrices.upPrice * 100).toFixed(1) + '%',
+        downPrice: (livePrices.downPrice * 100).toFixed(1) + '%',
+      });
+    }
+
+    return market;
   }
 }
 

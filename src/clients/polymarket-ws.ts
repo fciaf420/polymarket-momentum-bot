@@ -183,7 +183,10 @@ export class PolymarketWebSocketClient extends EventEmitter {
     if (message.price_changes && Array.isArray(message.price_changes)) {
       for (const pc of message.price_changes) {
         const price = normalizeSharePrice(pc.price);
-        logger.debug('Price update', { assetId: pc.asset_id.substring(0, 20), price });
+        logger.debug('Price change received', {
+          tokenId: pc.asset_id.substring(0, 16) + '...',
+          price: (price * 100).toFixed(1) + '%',
+        });
         this.emit('priceChange', pc.asset_id, price, timestamp);
       }
       return;
