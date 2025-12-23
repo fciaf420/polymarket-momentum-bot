@@ -76,6 +76,28 @@ export interface MoveProgress {
   threshold: number;
 }
 
+// Order book level for dashboard display
+export interface OrderBookLevel {
+  price: number;
+  size: number;
+  total: number; // Cumulative size
+}
+
+// Order book for a single market side (UP or DOWN token)
+export interface MarketOrderBook {
+  tokenId: string;
+  asset: CryptoAsset;
+  side: 'UP' | 'DOWN';
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  spread: number;
+  spreadPercent: number;
+  midPrice: number;
+  bidLiquidity: number; // Total $ available on bids
+  askLiquidity: number; // Total $ available on asks
+  lastUpdate: number;
+}
+
 export interface DashboardState {
   status: {
     isRunning: boolean;
@@ -153,6 +175,7 @@ export interface DashboardState {
   };
   validation: AssetValidation[];
   moveProgress: MoveProgress[];
+  orderbooks: MarketOrderBook[];
 }
 
 export class DashboardStateAggregator {
@@ -328,6 +351,7 @@ export class DashboardStateAggregator {
       },
       validation: this.strategy.getValidationState(),
       moveProgress: this.strategy.getMoveProgressAll(),
+      orderbooks: [], // Orderbooks are fetched separately via WebSocket
     };
   }
 

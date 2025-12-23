@@ -161,6 +161,26 @@ export interface MoveProgress {
   threshold: number;
 }
 
+export interface OrderBookLevel {
+  price: number;
+  size: number;
+  total: number;
+}
+
+export interface MarketOrderBook {
+  tokenId: string;
+  asset: CryptoAsset;
+  side: 'UP' | 'DOWN';
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  spread: number;
+  spreadPercent: number;
+  midPrice: number;
+  bidLiquidity: number;
+  askLiquidity: number;
+  lastUpdate: number;
+}
+
 export interface DashboardState {
   status: {
     isRunning: boolean;
@@ -197,6 +217,7 @@ export interface DashboardState {
   config: TradingConfig;
   validation: AssetValidation[];
   moveProgress: MoveProgress[];
+  orderbooks: MarketOrderBook[];
 }
 
 export interface WSMessage {

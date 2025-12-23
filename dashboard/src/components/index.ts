@@ -6,3 +6,4 @@ export { RiskMetrics } from './RiskMetrics';
 export { PriceMonitor } from './PriceMonitor';
 export { TradeHistory } from './TradeHistory';
 export { MoveProgress } from './MoveProgress';
+export { OrderBook } from './OrderBook';

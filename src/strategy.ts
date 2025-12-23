@@ -1841,6 +1841,142 @@ export class MomentumLagStrategy extends EventEmitter {
   }
 
   /**
+   * Get orderbooks for all active markets (for dashboard)
+   */
+  public async getOrderbooks(): Promise<Array<{
+    tokenId: string;
+    asset: CryptoAsset;
+    side: 'UP' | 'DOWN';
+    bids: Array<{ price: number; size: number; total: number }>;
+    asks: Array<{ price: number; size: number; total: number }>;
+    spread: number;
+    spreadPercent: number;
+    midPrice: number;
+    bidLiquidity: number;
+    askLiquidity: number;
+    lastUpdate: number;
+  }>> {
+    const results: Array<{
+      tokenId: string;
+      asset: CryptoAsset;
+      side: 'UP' | 'DOWN';
+      bids: Array<{ price: number; size: number; total: number }>;
+      asks: Array<{ price: number; size: number; total: number }>;
+      spread: number;
+      spreadPercent: number;
+      midPrice: number;
+      bidLiquidity: number;
+      askLiquidity: number;
+      lastUpdate: number;
+    }> = [];
+
+    const markets = this.getActiveMarkets();
+
+    // Fetch orderbooks in parallel (limit to 4 concurrent)
+    const fetchPromises: Promise<void>[] = [];
+
+    for (const market of markets) {
+      // Fetch UP token orderbook
+      fetchPromises.push(
+        this.clobClient.getOrderBook(market.upTokenId).then(book => {
+          // Sort bids DESCENDING (highest first - closest to spread)
+          // Sort asks ASCENDING (lowest first - closest to spread)
+          const sortedBids = [...book.bids].sort((a, b) => b.price - a.price).slice(0, 10);
+          const sortedAsks = [...book.asks].sort((a, b) => a.price - b.price).slice(0, 10);
+
+          // Calculate cumulative totals
+          let bidTotal = 0;
+          let askTotal = 0;
+          const bidsWithTotal = sortedBids.map(b => {
+            bidTotal += b.size;
+            return { price: b.price, size: b.size, total: bidTotal };
+          });
+          const asksWithTotal = sortedAsks.map(a => {
+            askTotal += a.size;
+            return { price: a.price, size: a.size, total: askTotal };
+          });
+
+          const bestBid = sortedBids[0]?.price || 0;
+          const bestAsk = sortedAsks[0]?.price || 1;
+          const spread = bestAsk - bestBid;
+          const midPrice = (bestBid + bestAsk) / 2;
+
+          results.push({
+            tokenId: market.upTokenId,
+            asset: market.asset,
+            side: 'UP',
+            bids: bidsWithTotal,
+            asks: asksWithTotal,
+            spread,
+            spreadPercent: midPrice > 0 ? spread / midPrice : 0,
+            midPrice,
+            bidLiquidity: sortedBids.reduce((sum, b) => sum + b.price * b.size, 0),
+            askLiquidity: sortedAsks.reduce((sum, a) => sum + a.price * a.size, 0),
+            lastUpdate: Date.now(),
+          });
+        }).catch(() => {
+          // Silent fail for individual orderbook fetches
+        })
+      );
+
+      // Fetch DOWN token orderbook
+      fetchPromises.push(
+        this.clobClient.getOrderBook(market.downTokenId).then(book => {
+          // Sort bids DESCENDING (highest first - closest to spread)
+          // Sort asks ASCENDING (lowest first - closest to spread)
+          const sortedBids = [...book.bids].sort((a, b) => b.price - a.price).slice(0, 10);
+          const sortedAsks = [...book.asks].sort((a, b) => a.price - b.price).slice(0, 10);
+
+          let bidTotal = 0;
+          let askTotal = 0;
+          const bidsWithTotal = sortedBids.map(b => {
+            bidTotal += b.size;
+            return { price: b.price, size: b.size, total: bidTotal };
+          });
+          const asksWithTotal = sortedAsks.map(a => {
+            askTotal += a.size;
+            return { price: a.price, size: a.size, total: askTotal };
+          });
+
+          const bestBid = sortedBids[0]?.price || 0;
+          const bestAsk = sortedAsks[0]?.price || 1;
+          const spread = bestAsk - bestBid;
+          const midPrice = (bestBid + bestAsk) / 2;
+
+          results.push({
+            tokenId: market.downTokenId,
+            asset: market.asset,
+            side: 'DOWN',
+            bids: bidsWithTotal,
+            asks: asksWithTotal,
+            spread,
+            spreadPercent: midPrice > 0 ? spread / midPrice : 0,
+            midPrice,
+            bidLiquidity: sortedBids.reduce((sum, b) => sum + b.price * b.size, 0),
+            askLiquidity: sortedAsks.reduce((sum, a) => sum + a.price * a.size, 0),
+            lastUpdate: Date.now(),
+          });
+        }).catch(() => {
+          // Silent fail for individual orderbook fetches
+        })
+      );
+    }
+
+    await Promise.all(fetchPromises);
+
+    // Sort results: by asset (BTC, ETH, SOL, XRP), then by side (UP before DOWN)
+    const assetOrder: Record<string, number> = { BTC: 0, ETH: 1, SOL: 2, XRP: 3 };
+    results.sort((a, b) => {
+      const assetDiff = (assetOrder[a.asset] ?? 99) - (assetOrder[b.asset] ?? 99);
+      if (assetDiff !== 0) return assetDiff;
+      // UP before DOWN
+      return a.side === 'UP' ? -1 : 1;
+    });
+
+    return results;
+  }
+
+  /**
    * Pause the strategy
    */
   public pause(reason?: string): void {

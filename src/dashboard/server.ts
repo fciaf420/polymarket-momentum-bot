@@ -35,6 +35,7 @@ export class DashboardServer {
   private strategy: MomentumLagStrategy;
   private clients: Set<WebSocket> = new Set();
   private priceUpdateInterval: ReturnType<typeof setInterval> | null = null;
+  private _orderbookUpdateInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     strategy: MomentumLagStrategy,
@@ -251,6 +252,21 @@ export class DashboardServer {
       }
     });
 
+    // Get orderbooks for all active markets
+    this.app.get('/api/orderbooks', async (_req: Request, res: Response) => {
+      try {
+        const orderbooks = await this.strategy.getOrderbooks();
+        res.json({ orderbooks, timestamp: Date.now() });
+      } catch (error) {
+        logger.error('Failed to fetch orderbooks', { error: (error as Error).message });
+        res.status(500).json({
+          error: (error as Error).message,
+          orderbooks: [],
+          timestamp: Date.now(),
+        });
+      }
+    });
+
     // Serve static files in production
     const dashboardBuildPath = path.join(__dirname, '../../dashboard/dist');
     this.app.use(express.static(dashboardBuildPath));
@@ -308,6 +324,17 @@ export class DashboardServer {
       case 'get_state':
         const state = this.stateAggregator.getState();
         this.sendToClient(ws, { type: 'state', data: state, timestamp: Date.now() });
+        break;
+      case 'get_orderbooks':
+        this.strategy.getOrderbooks().then(orderbooks => {
+          this.sendToClient(ws, { type: 'orderbooks', data: orderbooks, timestamp: Date.now() });
+        }).catch(() => {
+          this.sendToClient(ws, { type: 'orderbooks', data: [], timestamp: Date.now() });
+        });
+        break;
+      case 'subscribe_orderbooks':
+        // Client wants orderbook updates - will receive via broadcast
+        this.sendToClient(ws, { type: 'orderbooks_subscribed', timestamp: Date.now() });
         break;
       default:
         break;
@@ -417,6 +444,29 @@ export class DashboardServer {
         timestamp: Date.now(),
       });
     }, 1000); // Update every second
+
+    // Start orderbook updates (every 3 seconds to avoid API overload)
+    this.startOrderbookUpdates();
+  }
+
+  /**
+   * Start periodic orderbook updates
+   */
+  private startOrderbookUpdates(): void {
+    this._orderbookUpdateInterval = setInterval(async () => {
+      if (this.clients.size === 0) return;
+
+      try {
+        const orderbooks = await this.strategy.getOrderbooks();
+        this.broadcast({
+          type: 'orderbook_update',
+          data: orderbooks,
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        // Silent fail - orderbooks are optional
+      }
+    }, 3000); // Update every 3 seconds
   }
 
   /**
@@ -462,6 +512,9 @@ export class DashboardServer {
     return new Promise((resolve) => {
       if (this.priceUpdateInterval) {
         clearInterval(this.priceUpdateInterval);
+      }
+      if (this._orderbookUpdateInterval) {
+        clearInterval(this._orderbookUpdateInterval);
       }
 
       // Close all WebSocket connections

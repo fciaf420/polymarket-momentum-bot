@@ -10,6 +10,7 @@ import {
   PriceMonitor,
   TradeHistory,
   MoveProgress,
+  OrderBook,
 } from './components';
 import { ConfigBanner } from './components/ConfigBanner';
 import { ValidationChain } from './components/ValidationChain';
@@ -104,6 +105,11 @@ function App() {
             <PriceMonitor prices={state.prices} markets={state.markets} />
           </div>
         </div>
+
+        {/* Order Book Section - Full Width */}
+        <section className="mt-4">
+          <OrderBook orderbooks={state.orderbooks || []} />
+        </section>
       </main>
 
       {/* Footer */}

@@ -59,6 +59,31 @@ interface ApiKeyCreds {
   passphrase: string;
 }
 
+/**
+ * Calculate GCD of two numbers (for precision calculation)
+ */
+function gcd(a: number, b: number): number {
+  a = Math.abs(Math.round(a));
+  b = Math.abs(Math.round(b));
+  while (b !== 0) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
+
+/**
+ * Calculate the size granularity needed for a given price to produce clean 2-decimal USDC
+ * For price = 0.46 (46 cents), gcd(46, 10000) = 2, granularity = 10000/2 = 5000 -> 0.5 shares
+ * For price = 0.05 (5 cents), gcd(5, 10000) = 5, granularity = 10000/5 = 2000 -> 0.2 shares
+ */
+function getSizeGranularity(priceCents: number): number {
+  const g = gcd(priceCents, 10000);
+  const granularityInTenThousandths = 10000 / g;
+  return granularityInTenThousandths / 10000;
+}
+
 export class PolymarketClobClient {
   private client: any = null;
   private wallet: Wallet;
@@ -519,28 +544,65 @@ export class PolymarketClobClient {
       const negRisk = this.isNegRiskMarket(market);
       const roundedPrice = Math.round(limitPrice / tickSize) * tickSize;
 
-      // Same precision math as FOK
-      const usdcCents = Math.floor(amount * 100);
-      const priceInt = Math.round(roundedPrice * 10000);
-      const sharesInt = Math.floor((usdcCents * 10000 * 10000) / priceInt);
-      const totalShares = sharesInt / 10000;
-      const actualUsdc = Math.round(totalShares * roundedPrice * 100) / 100;
+      // Calculate size granularity to ensure clean 2-decimal USDC result
+      // The API requires: makerAmount max 2 decimals, takerAmount max 4 decimals
+      const priceCents = Math.round(roundedPrice * 100);
+      const sizeGranularity = getSizeGranularity(priceCents);
 
-      logger.debug('Creating FAK order (partial fills allowed)', {
+      // Calculate ideal size, then round DOWN to nearest granularity
+      const idealSize = amount / roundedPrice;
+      const totalShares = Math.floor(idealSize / sizeGranularity) * sizeGranularity;
+
+      // Round to 4 decimal places to avoid floating point issues
+      const cleanShares = Math.round(totalShares * 10000) / 10000;
+
+      // Calculate actual USDC (will now be clean 2 decimals)
+      const actualUsdc = Math.round(cleanShares * roundedPrice * 100) / 100;
+
+      // Skip if size is too small after granularity adjustment
+      if (cleanShares < sizeGranularity || actualUsdc < 0.01) {
+        logger.warn('Order size too small after precision adjustment', {
+          requestedAmount: amount,
+          sizeGranularity,
+          cleanShares,
+          actualUsdc,
+        });
+        throw new Error('Order size too small after precision adjustment');
+      }
+
+      // CRITICAL SAFETY CHECK: Never spend more than requested amount + 5% tolerance
+      // This prevents catastrophic bugs from draining the account
+      const maxAllowedUsdc = amount * 1.05;
+      if (actualUsdc > maxAllowedUsdc) {
+        logger.error('SAFETY ABORT: Calculated USDC exceeds requested amount!', {
+          requestedAmount: amount,
+          calculatedUsdc: actualUsdc,
+          cleanShares,
+          roundedPrice,
+          sizeGranularity,
+          priceCents,
+        });
+        throw new Error(`Safety check failed: would spend $${actualUsdc.toFixed(2)} but only $${amount.toFixed(2)} requested`);
+      }
+
+      logger.info('Creating FAK order (partial fills allowed)', {
         tickSize,
         negRisk,
         limitPrice,
         roundedPrice,
+        priceCents,
+        sizeGranularity,
         rawAmount: amount,
+        idealSize,
+        cleanShares,
         actualUsdc,
-        size: totalShares,
         orderType: 'FAK',
       });
 
       const orderArgs = {
         tokenID: tokenId,
         price: roundedPrice,
-        size: totalShares,
+        size: cleanShares,
         side: 'BUY' as const,
       };
 
@@ -551,6 +613,8 @@ export class PolymarketClobClient {
       if (!result?.success) {
         logger.warn('FAK order rejected', {
           limitPrice: roundedPrice,
+          size: cleanShares,
+          actualUsdc,
           errorMsg: result?.errorMsg,
         });
         throw new Error(result?.errorMsg || 'FAK order rejected');
@@ -560,7 +624,7 @@ export class PolymarketClobClient {
       // The API should return the filled amount - if not available, assume full fill on success
       const filledSize = result.filledAmount
         ? parseFloat(result.filledAmount)
-        : totalShares;
+        : cleanShares;
 
       if (filledSize === 0) {
         logger.warn('FAK order got zero fills - no liquidity at price', {
@@ -570,9 +634,9 @@ export class PolymarketClobClient {
       }
 
       logger.info('FAK order filled', {
-        requestedSize: totalShares.toFixed(4),
+        requestedSize: cleanShares.toFixed(4),
         filledSize: filledSize.toFixed(4),
-        fillPercent: ((filledSize / totalShares) * 100).toFixed(1) + '%',
+        fillPercent: ((filledSize / cleanShares) * 100).toFixed(1) + '%',
         price: roundedPrice,
       });
 
@@ -582,7 +646,7 @@ export class PolymarketClobClient {
         tokenId,
         side: 'BUY',
         type: 'limit_fak',
-        size: totalShares,
+        size: cleanShares,
         status: 'filled',
         filledSize: filledSize,
         avgFillPrice: roundedPrice,
@@ -643,35 +707,57 @@ export class PolymarketClobClient {
       // Round price to tick size
       const roundedPrice = Math.round(limitPrice / tickSize) * tickSize;
 
-      // Use integer math to avoid floating point precision issues
-      // API requires: makerAmount (USDC) max 2 decimals, takerAmount (shares) max 4 decimals
-      // The SDK computes makerAmount = size * price, which can introduce extra decimals
+      // Calculate size granularity to ensure clean 2-decimal USDC result
+      // The API requires: makerAmount max 2 decimals, takerAmount max 4 decimals
+      const priceCents = Math.round(roundedPrice * 100);
+      const sizeGranularity = getSizeGranularity(priceCents);
 
-      // Step 1: Round USDC to cents (2 decimal precision)
-      const usdcCents = Math.floor(amount * 100);  // e.g., 651 cents = $6.51
+      // Calculate ideal size, then round DOWN to nearest granularity
+      const idealSize = amount / roundedPrice;
+      const totalShares = Math.floor(idealSize / sizeGranularity) * sizeGranularity;
 
-      // Step 2: Express price as integer (multiply by 10000 to handle tick sizes like 0.01)
-      const priceInt = Math.round(roundedPrice * 10000);  // e.g., 4400 for $0.44
+      // Round to 4 decimal places to avoid floating point issues
+      const cleanShares = Math.round(totalShares * 10000) / 10000;
 
-      // Step 3: Calculate shares such that shares * price = clean 2-decimal USDC
-      // We need: (shares * price * 1e6) % 10000 == 0 for 2 decimal precision
-      // shares = usdcCents / (priceInt / 10000) = usdcCents * 10000 / priceInt
-      // Round down to ensure we don't overspend
-      const sharesInt = Math.floor((usdcCents * 10000 * 10000) / priceInt);  // shares * 10000
-      const totalShares = sharesInt / 10000;  // 4 decimal precision
+      // Calculate actual USDC (will now be clean 2 decimals)
+      const actualUsdc = Math.round(cleanShares * roundedPrice * 100) / 100;
 
-      // Step 4: Recalculate the actual USDC amount (for logging)
-      const actualUsdc = Math.round(totalShares * roundedPrice * 100) / 100;
+      // Skip if size is too small after granularity adjustment
+      if (cleanShares < sizeGranularity || actualUsdc < 0.01) {
+        logger.warn('Order size too small after precision adjustment', {
+          requestedAmount: amount,
+          sizeGranularity,
+          cleanShares,
+          actualUsdc,
+        });
+        throw new Error('Order size too small after precision adjustment');
+      }
 
-      logger.debug('Creating FOK order (precision-safe)', {
+      // CRITICAL SAFETY CHECK: Never spend more than requested amount + 5% tolerance
+      const maxAllowedUsdc = amount * 1.05;
+      if (actualUsdc > maxAllowedUsdc) {
+        logger.error('SAFETY ABORT: Calculated USDC exceeds requested amount!', {
+          requestedAmount: amount,
+          calculatedUsdc: actualUsdc,
+          cleanShares,
+          roundedPrice,
+          sizeGranularity,
+          priceCents,
+        });
+        throw new Error(`Safety check failed: would spend $${actualUsdc.toFixed(2)} but only $${amount.toFixed(2)} requested`);
+      }
+
+      logger.info('Creating FOK order (precision-safe)', {
         tickSize,
         negRisk,
         limitPrice,
         roundedPrice,
+        priceCents,
+        sizeGranularity,
         rawAmount: amount,
-        usdcCents,
+        idealSize,
+        cleanShares,
         actualUsdc,
-        size: totalShares,
         orderType: 'FOK',
       });
 
@@ -679,7 +765,7 @@ export class PolymarketClobClient {
       const orderArgs = {
         tokenID: tokenId,
         price: roundedPrice,
-        size: totalShares,
+        size: cleanShares,
         side: 'BUY' as const,
       };
 
@@ -690,6 +776,8 @@ export class PolymarketClobClient {
       if (!result?.success) {
         logger.warn('FOK order not filled - no liquidity at limit price', {
           limitPrice: roundedPrice,
+          size: cleanShares,
+          actualUsdc,
           errorMsg: result?.errorMsg,
         });
         throw new Error(result?.errorMsg || 'FOK order not filled');
@@ -701,9 +789,9 @@ export class PolymarketClobClient {
         tokenId,
         side: 'BUY',
         type: 'limit_fok',
-        size: totalShares,
+        size: cleanShares,
         status: 'filled',
-        filledSize: totalShares,
+        filledSize: cleanShares,
         avgFillPrice: roundedPrice,
         timestamp: Date.now(),
       };

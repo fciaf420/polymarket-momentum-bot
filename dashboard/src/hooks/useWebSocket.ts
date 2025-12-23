@@ -156,6 +156,16 @@ export function useWebSocket(url: string = '/ws'): UseWebSocketReturn {
       case 'pong':
         // Heartbeat response
         break;
+
+      case 'orderbook_update':
+        setState((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            orderbooks: message.data as DashboardState['orderbooks'],
+          };
+        });
+        break;
     }
   }, []);
 
