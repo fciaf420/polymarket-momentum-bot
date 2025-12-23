@@ -38,6 +38,7 @@ function wrapWalletForClobClient(wallet: Wallet): Wallet & { _signTypedData: typ
 // Dynamic import for ClobClient since it may not have proper types
 let ClobClient: any;
 let Chain: any;
+let OrderType: { GTC: string; FOK: string; GTD: string; FAK: string };
 
 async function loadClobClient() {
   try {
@@ -45,6 +46,7 @@ async function loadClobClient() {
     const module = await import('@polymarket/clob-client');
     ClobClient = module.ClobClient;
     Chain = module.Chain;
+    OrderType = module.OrderType;
   } catch (error) {
     logger.error('Failed to load @polymarket/clob-client', { error: (error as Error).message });
     throw error;
@@ -485,6 +487,349 @@ export class PolymarketClobClient {
   }
 
   /**
+   * Place a FAK (Fill-And-Kill / IOC) limit buy order
+   * Fills whatever is available at limit price, cancels the rest
+   * Better for thin liquidity - gets partial fills instead of nothing
+   */
+  public async limitBuyFAK(
+    tokenId: string,
+    amount: number,
+    limitPrice: number,
+    market: CryptoMarket
+  ): Promise<Order> {
+    const orderId = generateId();
+
+    logger.info('Placing FAK limit buy order', {
+      orderId,
+      tokenId,
+      amount,
+      limitPrice,
+      market: market.marketSlug,
+      dryRun: this.dryRun,
+    });
+
+    if (this.dryRun) {
+      return this.simulateMarketBuy(orderId, tokenId, amount, market);
+    }
+
+    await this.ensureInitialized();
+
+    try {
+      const tickSize = await this.getTickSize(tokenId);
+      const negRisk = this.isNegRiskMarket(market);
+      const roundedPrice = Math.round(limitPrice / tickSize) * tickSize;
+
+      // Same precision math as FOK
+      const usdcCents = Math.floor(amount * 100);
+      const priceInt = Math.round(roundedPrice * 10000);
+      const sharesInt = Math.floor((usdcCents * 10000 * 10000) / priceInt);
+      const totalShares = sharesInt / 10000;
+      const actualUsdc = Math.round(totalShares * roundedPrice * 100) / 100;
+
+      logger.debug('Creating FAK order (partial fills allowed)', {
+        tickSize,
+        negRisk,
+        limitPrice,
+        roundedPrice,
+        rawAmount: amount,
+        actualUsdc,
+        size: totalShares,
+        orderType: 'FAK',
+      });
+
+      const orderArgs = {
+        tokenID: tokenId,
+        price: roundedPrice,
+        size: totalShares,
+        side: 'BUY' as const,
+      };
+
+      const signedOrder = await this.client.createOrder(orderArgs, { tickSize, negRisk });
+      const result = await this.client.postOrder(signedOrder, OrderType.FAK);
+
+      // FAK can partially fill - check what we got
+      if (!result?.success) {
+        logger.warn('FAK order rejected', {
+          limitPrice: roundedPrice,
+          errorMsg: result?.errorMsg,
+        });
+        throw new Error(result?.errorMsg || 'FAK order rejected');
+      }
+
+      // Get actual fill amount from result
+      // The API should return the filled amount - if not available, assume full fill on success
+      const filledSize = result.filledAmount
+        ? parseFloat(result.filledAmount)
+        : totalShares;
+
+      if (filledSize === 0) {
+        logger.warn('FAK order got zero fills - no liquidity at price', {
+          limitPrice: roundedPrice,
+        });
+        throw new Error('FAK order got zero fills');
+      }
+
+      logger.info('FAK order filled', {
+        requestedSize: totalShares.toFixed(4),
+        filledSize: filledSize.toFixed(4),
+        fillPercent: ((filledSize / totalShares) * 100).toFixed(1) + '%',
+        price: roundedPrice,
+      });
+
+      return {
+        id: result.orderId || orderId,
+        marketId: market.conditionId,
+        tokenId,
+        side: 'BUY',
+        type: 'limit_fak',
+        size: totalShares,
+        status: 'filled',
+        filledSize: filledSize,
+        avgFillPrice: roundedPrice,
+        timestamp: Date.now(),
+      };
+
+    } catch (error) {
+      logger.error('FAK limit buy order failed', { error: (error as Error).message });
+
+      return {
+        id: orderId,
+        marketId: market.conditionId,
+        tokenId,
+        side: 'BUY',
+        type: 'limit_fak',
+        size: 0,
+        status: 'failed',
+        filledSize: 0,
+        avgFillPrice: 0,
+        timestamp: Date.now(),
+        failureReason: 'no_liquidity',
+      };
+    }
+  }
+
+  /**
+   * Place a FOK (Fill-or-Kill) limit buy order
+   * Either fills entirely at the limit price or cancels immediately
+   */
+  public async limitBuyFOK(
+    tokenId: string,
+    amount: number,
+    limitPrice: number,
+    market: CryptoMarket
+  ): Promise<Order> {
+    const orderId = generateId();
+
+    logger.info('Placing FOK limit buy order', {
+      orderId,
+      tokenId,
+      amount,
+      limitPrice,
+      market: market.marketSlug,
+      dryRun: this.dryRun,
+    });
+
+    if (this.dryRun) {
+      return this.simulateMarketBuy(orderId, tokenId, amount, market);
+    }
+
+    await this.ensureInitialized();
+
+    try {
+      // Fetch tick size and neg risk config for the market
+      const tickSize = await this.getTickSize(tokenId);
+      const negRisk = this.isNegRiskMarket(market);
+
+      // Round price to tick size
+      const roundedPrice = Math.round(limitPrice / tickSize) * tickSize;
+
+      // Use integer math to avoid floating point precision issues
+      // API requires: makerAmount (USDC) max 2 decimals, takerAmount (shares) max 4 decimals
+      // The SDK computes makerAmount = size * price, which can introduce extra decimals
+
+      // Step 1: Round USDC to cents (2 decimal precision)
+      const usdcCents = Math.floor(amount * 100);  // e.g., 651 cents = $6.51
+
+      // Step 2: Express price as integer (multiply by 10000 to handle tick sizes like 0.01)
+      const priceInt = Math.round(roundedPrice * 10000);  // e.g., 4400 for $0.44
+
+      // Step 3: Calculate shares such that shares * price = clean 2-decimal USDC
+      // We need: (shares * price * 1e6) % 10000 == 0 for 2 decimal precision
+      // shares = usdcCents / (priceInt / 10000) = usdcCents * 10000 / priceInt
+      // Round down to ensure we don't overspend
+      const sharesInt = Math.floor((usdcCents * 10000 * 10000) / priceInt);  // shares * 10000
+      const totalShares = sharesInt / 10000;  // 4 decimal precision
+
+      // Step 4: Recalculate the actual USDC amount (for logging)
+      const actualUsdc = Math.round(totalShares * roundedPrice * 100) / 100;
+
+      logger.debug('Creating FOK order (precision-safe)', {
+        tickSize,
+        negRisk,
+        limitPrice,
+        roundedPrice,
+        rawAmount: amount,
+        usdcCents,
+        actualUsdc,
+        size: totalShares,
+        orderType: 'FOK',
+      });
+
+      // Create order args
+      const orderArgs = {
+        tokenID: tokenId,
+        price: roundedPrice,
+        size: totalShares,
+        side: 'BUY' as const,
+      };
+
+      // Create and post FOK order
+      const signedOrder = await this.client.createOrder(orderArgs, { tickSize, negRisk });
+      const result = await this.client.postOrder(signedOrder, OrderType.FOK);
+
+      if (!result?.success) {
+        logger.warn('FOK order not filled - no liquidity at limit price', {
+          limitPrice: roundedPrice,
+          errorMsg: result?.errorMsg,
+        });
+        throw new Error(result?.errorMsg || 'FOK order not filled');
+      }
+
+      return {
+        id: result.orderId || orderId,
+        marketId: market.conditionId,
+        tokenId,
+        side: 'BUY',
+        type: 'limit_fok',
+        size: totalShares,
+        status: 'filled',
+        filledSize: totalShares,
+        avgFillPrice: roundedPrice,
+        timestamp: Date.now(),
+      };
+
+    } catch (error) {
+      logger.error('FOK limit buy order failed', { error: (error as Error).message });
+
+      return {
+        id: orderId,
+        marketId: market.conditionId,
+        tokenId,
+        side: 'BUY',
+        type: 'limit_fok',
+        size: 0,
+        status: 'failed',
+        filledSize: 0,
+        avgFillPrice: 0,
+        timestamp: Date.now(),
+      };
+    }
+  }
+
+  /**
+   * Place a FOK (Fill-or-Kill) limit sell order
+   * Either fills entirely at the limit price or cancels immediately
+   */
+  public async limitSellFOK(
+    tokenId: string,
+    size: number,
+    limitPrice: number,
+    market: CryptoMarket
+  ): Promise<Order> {
+    const orderId = generateId();
+
+    logger.info('Placing FOK limit sell order', {
+      orderId,
+      tokenId,
+      size,
+      limitPrice,
+      market: market.marketSlug,
+      dryRun: this.dryRun,
+    });
+
+    if (this.dryRun) {
+      return this.simulateMarketSell(orderId, tokenId, size, market);
+    }
+
+    await this.ensureInitialized();
+
+    // Ensure CTF tokens are approved for selling (one-time check per session)
+    await this.ensureCTFApproval();
+
+    try {
+      // Fetch tick size and neg risk config for the market
+      const tickSize = await this.getTickSize(tokenId);
+      const negRisk = this.isNegRiskMarket(market);
+
+      // Round price to tick size
+      const roundedPrice = Math.round(limitPrice / tickSize) * tickSize;
+
+      logger.debug('Creating FOK sell order', {
+        tickSize,
+        negRisk,
+        limitPrice,
+        roundedPrice,
+        size,
+        orderType: 'FOK',
+      });
+
+      // Create order args
+      const orderArgs = {
+        tokenID: tokenId,
+        price: roundedPrice,
+        size,
+        side: 'SELL' as const,
+      };
+
+      // Create and post FOK order
+      const signedOrder = await this.client.createOrder(orderArgs, { tickSize, negRisk });
+      const result = await this.client.postOrder(signedOrder, OrderType.FOK);
+
+      if (!result?.success) {
+        logger.warn('FOK sell order not filled - no liquidity at limit price', {
+          limitPrice: roundedPrice,
+          errorMsg: result?.errorMsg,
+        });
+        throw new Error(result?.errorMsg || 'FOK order not filled');
+      }
+
+      return {
+        id: result.orderId || orderId,
+        marketId: market.conditionId,
+        tokenId,
+        side: 'SELL',
+        type: 'limit_fok',
+        size,
+        status: 'filled',
+        filledSize: size,
+        avgFillPrice: roundedPrice,
+        timestamp: Date.now(),
+      };
+
+    } catch (error) {
+      logger.error('FOK limit sell order failed', {
+        market: market.marketSlug,
+        tokenId: tokenId.substring(0, 20),
+        size,
+        error: (error as Error).message,
+      });
+
+      return {
+        id: orderId,
+        marketId: market.conditionId,
+        tokenId,
+        side: 'SELL',
+        type: 'limit_fok',
+        size: 0,
+        status: 'failed',
+        filledSize: 0,
+        avgFillPrice: 0,
+        timestamp: Date.now(),
+      };
+    }
+  }
+
+  /**
    * Place a market sell order
    */
   public async marketSell(
@@ -530,18 +875,23 @@ export class PolymarketClobClient {
       // Round price to tick size
       const roundedPrice = Math.round(bestBid / tickSize) * tickSize;
 
+      // Round share size to 4 decimals (API requirement for taker amount on sells)
+      // For SELL: makerAmount = shares (4 decimals), takerAmount = USDC (2 decimals)
+      const roundedSize = Math.floor(size * 10000) / 10000;
+
       logger.debug('Creating sell order with market config', {
         tickSize,
         negRisk,
         rawPrice: bestBid,
         roundedPrice,
-        size,
+        rawSize: size,
+        roundedSize,
       });
 
       const orderArgs = {
         tokenID: tokenId,  // Library uses tokenID not tokenId
         price: roundedPrice,
-        size,
+        size: roundedSize,
         side: 'SELL' as const,
       };
 

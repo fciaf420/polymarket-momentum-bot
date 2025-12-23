@@ -13,7 +13,6 @@ import {
 } from './components';
 import { ConfigBanner } from './components/ConfigBanner';
 import { ValidationChain } from './components/ValidationChain';
-import { Loader2 } from 'lucide-react';
 
 function App() {
   const { state, isConnected, error, reconnect } = useWebSocket('/ws');
@@ -37,18 +36,25 @@ function App() {
   // Loading state
   if (!state) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="h-12 w-12 text-emerald-500 animate-spin mx-auto mb-4" />
-          <p className="text-slate-400">Connecting to dashboard...</p>
+      <div className="min-h-screen bg-term-bg flex items-center justify-center">
+        <div className="text-center font-mono">
+          <div className="text-cyber-cyan text-2xl mb-4 animate-pulse">
+            [ CONNECTING ]
+          </div>
+          <div className="text-term-muted text-sm">
+            Establishing connection to dashboard...
+          </div>
+          <div className="mt-4 text-term-dim text-xs">
+            <span className="animate-blink">_</span>
+          </div>
           {error && (
-            <div className="mt-4">
-              <p className="text-red-400 mb-2">{error}</p>
+            <div className="mt-6">
+              <p className="text-hot-pink mb-3">{error}</p>
               <button
                 onClick={reconnect}
-                className="px-4 py-2 bg-emerald-500/20 text-emerald-400 rounded hover:bg-emerald-500/30"
+                className="terminal-btn"
               >
-                Retry Connection
+                [RETRY CONNECTION]
               </button>
             </div>
           )}
@@ -58,7 +64,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900">
+    <div className="min-h-screen bg-term-bg">
       {/* Header */}
       <Header
         state={state}
@@ -71,45 +77,44 @@ function App() {
       <ConfigBanner config={state.config} />
 
       {/* Main Content */}
-      <main className="p-6">
+      <main className="p-4">
         {/* Account Stats Row */}
-        <section className="mb-6">
+        <section className="mb-4">
           <AccountStats state={state} />
         </section>
 
-        {/* Validation Chain - Real-time signal checks */}
-        <section className="mb-6">
-          <ValidationChain validation={state.validation} />
-        </section>
+        {/* Main Grid - 3 columns */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          {/* Left Column - Validation & Move Progress */}
+          <div className="lg:col-span-3 space-y-4">
+            <ValidationChain validation={state.validation} />
+            <MoveProgress moveProgress={state.moveProgress} />
+            <RiskMetrics risk={state.risk} accountBalance={state.account.balance} />
+          </div>
 
-        {/* Move Progress - Shows progress toward hard move threshold */}
-        <section className="mb-6">
-          <MoveProgress moveProgress={state.moveProgress} />
-        </section>
-
-        {/* Main Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column - Positions, Signals, Trades, Risk */}
-          <div className="lg:col-span-2 space-y-6">
+          {/* Center Column - Positions, Signals, Trades */}
+          <div className="lg:col-span-5 space-y-4">
             <LivePositions positions={state.positions} />
             <RecentSignals signals={state.signals} />
             <TradeHistory summary={state.trades.summary} />
-            <RiskMetrics risk={state.risk} />
           </div>
 
           {/* Right Column - Price Monitor (sticky) */}
-          <div className="lg:sticky lg:top-6 lg:self-start">
+          <div className="lg:col-span-4 lg:sticky lg:top-4 lg:self-start">
             <PriceMonitor prices={state.prices} markets={state.markets} />
           </div>
         </div>
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-800 p-4 text-center text-sm text-slate-500">
-        <p>Polymarket Momentum Bot Dashboard v1.0.0</p>
-        <p className="text-xs mt-1">
-          {isConnected ? 'Real-time updates active' : 'Attempting to reconnect...'}
-        </p>
+      <footer className="border-t border-term-border p-3 text-center font-mono text-xs">
+        <div className="flex items-center justify-center gap-4">
+          <span className="text-term-dim">POLYMARKET MOMENTUM v1.0.0</span>
+          <span className="text-term-border">|</span>
+          <span className={isConnected ? 'text-matrix-green' : 'text-hot-pink'}>
+            {isConnected ? '● LIVE' : '○ RECONNECTING'}
+          </span>
+        </div>
       </footer>
     </div>
   );

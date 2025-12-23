@@ -1,6 +1,4 @@
 import { useState, useEffect } from 'react';
-import { Coins, Clock, TrendingUp, TrendingDown, Timer } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
 import { clsx } from 'clsx';
 import type { DashboardState, CryptoAsset } from '../types';
 
@@ -9,199 +7,140 @@ interface PriceMonitorProps {
   markets: DashboardState['markets'];
 }
 
-// Crypto logo URLs from CoinGecko CDN
-const ASSET_LOGOS: Record<CryptoAsset, string> = {
-  BTC: 'https://assets.coingecko.com/coins/images/1/small/bitcoin.png',
-  ETH: 'https://assets.coingecko.com/coins/images/279/small/ethereum.png',
-  SOL: 'https://assets.coingecko.com/coins/images/4128/small/solana.png',
-  XRP: 'https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png',
-};
-
-const ASSET_COLORS: Record<CryptoAsset, string> = {
-  BTC: 'orange',
-  ETH: 'purple',
-  SOL: 'cyan',
-  XRP: 'slate',
-};
-
-// Format countdown as MM:SS
 function formatCountdown(ms: number): string {
-  if (ms <= 0) return '0:00';
+  if (ms <= 0) return '00:00';
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function formatCurrency(value: number, asset?: CryptoAsset): string {
-  if (asset && value > 1000) {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
+function formatPrice(value: number): string {
+  if (value >= 1000) {
+    return value.toLocaleString('en-US', {
       minimumFractionDigits: 0,
       maximumFractionDigits: 0,
-    }).format(value);
+    });
   }
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
+  return value.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
-  }).format(value);
+  });
+}
+
+function AsciiProgressBar({ value, width = 20 }: { value: number; width?: number }) {
+  const filled = Math.round(value * width);
+  const empty = width - filled;
+  return (
+    <span className="font-mono text-xs">
+      <span className="text-matrix-green">{'█'.repeat(filled)}</span>
+      <span className="text-term-dim">{'░'.repeat(empty)}</span>
+    </span>
+  );
 }
 
 export function PriceMonitor({ prices, markets }: PriceMonitorProps) {
   const [now, setNow] = useState(Date.now());
   const assets = Object.keys(prices.crypto) as CryptoAsset[];
 
-  // Update countdown every second
   useEffect(() => {
-    const interval = setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
+    const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
   }, []);
 
   if (assets.length === 0) {
     return (
-      <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-          <Coins className="h-5 w-5 text-yellow-400" />
-          Price Monitor
-        </h2>
-        <div className="text-center py-8 text-slate-400">
-          <Coins className="h-12 w-12 mx-auto mb-2 opacity-50" />
-          <p>Waiting for price data...</p>
+      <div className="terminal-panel">
+        <div className="terminal-header">PRICES</div>
+        <div className="text-center py-6">
+          <div className="text-term-dim text-sm">[ AWAITING PRICE DATA ]</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="card">
-      <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-        <Coins className="h-5 w-5 text-yellow-400" />
-        Price Monitor
-      </h2>
+    <div className="terminal-panel">
+      <div className="terminal-header">MARKET DATA</div>
 
       <div className="space-y-4">
         {assets.map((asset) => {
           const cryptoPrice = prices.crypto[asset];
           const assetMarkets = markets.filter((m) => m.asset === asset);
-          const color = ASSET_COLORS[asset];
-          const logo = ASSET_LOGOS[asset];
-
-          // Get the main market odds for this asset (first available market)
           const mainMarket = assetMarkets[0];
           const mainMarketPrice = mainMarket ? prices.markets[mainMarket.conditionId] : null;
-
-          // Calculate countdown for main market
           const expiryMs = mainMarket ? new Date(mainMarket.expiryTime).getTime() : 0;
           const timeLeft = expiryMs - now;
-          const isExpiringSoon = timeLeft > 0 && timeLeft < 2 * 60 * 1000; // Less than 2 min
+          const isExpiringSoon = timeLeft > 0 && timeLeft < 2 * 60 * 1000;
 
           return (
-            <div key={asset} className="border border-slate-700 rounded-lg p-3">
-              <div className="flex items-center justify-between mb-2">
+            <div key={asset} className="border border-term-border p-3">
+              {/* Header Row */}
+              <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-3">
-                  <div
-                    className={`w-10 h-10 rounded-full flex items-center justify-center bg-${color}-500/20 p-1.5`}
-                  >
-                    <img
-                      src={logo}
-                      alt={asset}
-                      className="w-full h-full object-contain"
-                      onError={(e) => {
-                        // Fallback to text if image fails to load
-                        e.currentTarget.style.display = 'none';
-                        e.currentTarget.nextElementSibling?.classList.remove('hidden');
-                      }}
-                    />
-                    <span className={`text-${color}-400 font-bold text-sm hidden`}>{asset}</span>
-                  </div>
-                  <div>
-                    <p className="font-bold text-white text-lg">{asset}</p>
-                    <p className="text-xs text-slate-400">
-                      <Clock className="h-3 w-3 inline mr-1" />
-                      {cryptoPrice && formatDistanceToNow(cryptoPrice.timestamp, { addSuffix: true })}
-                    </p>
-                  </div>
+                  <span className="text-cyber-cyan font-bold text-lg">{asset}</span>
+                  <span className="text-term-text text-xl font-mono num-fixed">
+                    ${cryptoPrice ? formatPrice(cryptoPrice.price) : '---'}
+                  </span>
                 </div>
-                <div className="text-right">
-                  <p className="text-xl font-bold text-white">
-                    {cryptoPrice ? formatCurrency(cryptoPrice.price, asset) : '-'}
-                  </p>
-                  {/* Countdown Timer */}
-                  {mainMarket && timeLeft > 0 && (
-                    <div className={clsx(
-                      'flex items-center justify-end gap-1 text-xs font-mono',
-                      isExpiringSoon ? 'text-amber-400' : 'text-slate-400'
-                    )}>
-                      <Timer className="h-3 w-3" />
-                      <span>{formatCountdown(timeLeft)}</span>
-                    </div>
-                  )}
-                </div>
+                {/* Countdown */}
+                {mainMarket && timeLeft > 0 && (
+                  <div className={clsx(
+                    'font-mono text-sm',
+                    isExpiringSoon ? 'text-hot-pink animate-pulse' : 'text-term-muted'
+                  )}>
+                    T-{formatCountdown(timeLeft)}
+                  </div>
+                )}
               </div>
 
-              {/* UP/DOWN Odds Display */}
+              {/* Odds Display */}
               {mainMarketPrice && (
-                <div className="flex items-center justify-center gap-4 py-2 bg-slate-800/50 rounded-lg mb-2">
-                  <div className="flex items-center gap-1.5">
-                    <TrendingUp className="h-4 w-4 text-emerald-400" />
-                    <span className="text-sm font-medium text-emerald-400">
-                      UP {(mainMarketPrice.upPrice * 100).toFixed(0)}%
-                    </span>
+                <div className="space-y-2">
+                  {/* UP/DOWN Values */}
+                  <div className="flex items-center justify-between text-sm font-mono">
+                    <div className="flex items-center gap-2">
+                      <span className="text-matrix-green">▲ UP</span>
+                      <span className="text-matrix-green font-bold">
+                        {(mainMarketPrice.upPrice * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-hot-pink font-bold">
+                        {(mainMarketPrice.downPrice * 100).toFixed(0)}%
+                      </span>
+                      <span className="text-hot-pink">DN ▼</span>
+                    </div>
                   </div>
-                  <div className="w-px h-4 bg-slate-600" />
-                  <div className="flex items-center gap-1.5">
-                    <TrendingDown className="h-4 w-4 text-red-400" />
-                    <span className="text-sm font-medium text-red-400">
-                      DOWN {(mainMarketPrice.downPrice * 100).toFixed(0)}%
-                    </span>
+
+                  {/* ASCII Progress Bar */}
+                  <div className="flex items-center gap-2">
+                    <AsciiProgressBar value={mainMarketPrice.upPrice} width={30} />
                   </div>
                 </div>
               )}
 
-              {/* Odds bar visualization */}
-              {mainMarketPrice && (
-                <div className="h-2 bg-slate-700 rounded-full overflow-hidden mb-2">
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400"
-                    style={{ width: `${mainMarketPrice.upPrice * 100}%` }}
-                  />
-                </div>
-              )}
-
-              {/* Active Markets for this Asset */}
-              {assetMarkets.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-slate-700/50">
-                  <p className="text-xs text-slate-500 mb-2">Active Markets ({assetMarkets.length})</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {assetMarkets.map((market) => {
-                      const marketPrice = prices.markets[market.conditionId];
-                      const expiryMs = new Date(market.expiryTime).getTime();
-                      const minutesLeft = Math.max(0, Math.floor((expiryMs - Date.now()) / 60000));
+              {/* Sub-markets */}
+              {assetMarkets.length > 1 && (
+                <div className="mt-3 pt-2 border-t border-term-border">
+                  <div className="text-term-dim text-xs mb-2">ACTIVE MARKETS: {assetMarkets.length}</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                    {assetMarkets.slice(0, 4).map((market) => {
+                      const mp = prices.markets[market.conditionId];
+                      const exp = new Date(market.expiryTime).getTime();
+                      const minLeft = Math.max(0, Math.floor((exp - now) / 60000));
 
                       return (
-                        <div
-                          key={market.conditionId}
-                          className="bg-slate-700/30 rounded p-2 text-xs"
-                        >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className={clsx(
-                              'font-medium',
-                              market.direction === 'UP' ? 'text-emerald-400' : 'text-red-400'
-                            )}>
-                              {market.direction === 'UP' ? '↑ UP' : '↓ DOWN'}
+                        <div key={market.conditionId} className="flex justify-between text-term-muted">
+                          <span className={market.direction === 'UP' ? 'text-matrix-green' : 'text-hot-pink'}>
+                            {market.direction === 'UP' ? '↑' : '↓'} {minLeft}m
+                          </span>
+                          {mp && (
+                            <span>
+                              <span className="text-matrix-green">{(mp.upPrice * 100).toFixed(0)}</span>
+                              /
+                              <span className="text-hot-pink">{(mp.downPrice * 100).toFixed(0)}</span>
                             </span>
-                            <span className="text-slate-400">{minutesLeft}m</span>
-                          </div>
-                          {marketPrice && (
-                            <div className="flex justify-between text-slate-300">
-                              <span className="text-emerald-400/80">UP {(marketPrice.upPrice * 100).toFixed(0)}%</span>
-                              <span className="text-red-400/80">DN {(marketPrice.downPrice * 100).toFixed(0)}%</span>
-                            </div>
                           )}
                         </div>
                       );

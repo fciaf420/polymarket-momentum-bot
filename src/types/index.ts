@@ -38,6 +38,8 @@ export interface CryptoMarket extends Market {
   expiryTime: Date;
   upTokenId: string;
   downTokenId: string;
+  windowStartTime?: number;      // When the 15-min window started (expiry - 15 min)
+  windowStartCryptoPrice?: number; // Crypto price at window start
 }
 
 export type CryptoAsset = 'BTC' | 'ETH' | 'SOL' | 'XRP';
@@ -173,6 +175,9 @@ export interface Position {
   exitTimestamp?: number;
   realizedPnl?: number;
   exitReason?: ExitReason;
+  isOrphaned?: boolean;   // True if position was synced from on-chain (not from signal)
+  signalTimestamp?: number; // When signal was detected (for latency calc)
+  orderSubmitTimestamp?: number; // When order was submitted
 }
 
 export type PositionStatus = 'open' | 'closing' | 'closed';
@@ -187,7 +192,7 @@ export interface Order {
   marketId: string;
   tokenId: string;
   side: OrderSide;
-  type: 'market' | 'limit';
+  type: 'market' | 'limit' | 'limit_fok' | 'limit_fak';
   price?: number;
   size: number;
   status: OrderStatus;
@@ -219,6 +224,12 @@ export interface TradeRecord {
   exitReason: ExitReason;
   signalGap: number;
   signalConfidence: number;
+  // Debug fields for execution analysis
+  isOrphaned?: boolean;         // Was this an orphaned position?
+  orderLatencyMs?: number;      // Time from signal to fill (ms)
+  slippage?: number;            // (fill_price - expected_price) / expected_price
+  expectedPrice?: number;       // Price when signal was generated
+  marketSpreadAtEntry?: number; // Bid-ask spread at entry
 }
 
 // ===========================================
@@ -291,6 +302,8 @@ export interface Config {
   minLiquidity: number;
   maxHoldMinutes: number;
   exitGapThreshold: number;
+  maxTradeUsd: number;      // Hard cap on trade size in USD
+  maxEntrySlippage: number; // Max slippage above signal price (0.10 = 10%)
 
   // Risk
   maxDrawdown: number;

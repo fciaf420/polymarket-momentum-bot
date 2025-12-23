@@ -105,6 +105,8 @@ export interface RiskMetrics {
   winRate: number;
   profitFactor: number;
   sharpeRatio: number;
+  averageWin: number;
+  averageLoss: number;
 }
 
 export interface RiskLimits {
@@ -112,6 +114,8 @@ export interface RiskLimits {
   maxPositions: number;
   maxPositionSize: number;
   minLiquidity: number;
+  maxDailyLoss: number;
+  maxConcentration: number;
 }
 
 export interface TradingConfig {
@@ -123,6 +127,7 @@ export interface TradingConfig {
   maxHoldMinutes: number;
   exitGapThreshold: number;
   maxDrawdown: number;
+  maxEntrySlippage: number;
   backtest: boolean;
   dryRun: boolean;
 }

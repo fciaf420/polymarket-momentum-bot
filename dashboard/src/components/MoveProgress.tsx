@@ -1,85 +1,88 @@
-import { ArrowUp, ArrowDown, Minus, Activity } from 'lucide-react';
+import { clsx } from 'clsx';
 import type { MoveProgress as MoveProgressType } from '../types';
 
 interface MoveProgressProps {
   moveProgress: MoveProgressType[];
 }
 
-export function MoveProgress({ moveProgress }: MoveProgressProps) {
-  if (!moveProgress || moveProgress.length === 0) {
-    return (
-      <div className="bg-slate-800 rounded-lg p-4">
-        <div className="flex items-center gap-2 mb-4">
-          <Activity className="h-5 w-5 text-purple-400" />
-          <h2 className="text-lg font-semibold text-white">Move Progress</h2>
-        </div>
-        <p className="text-slate-400 text-sm">Waiting for price data...</p>
-      </div>
-    );
-  }
+function AsciiProgressBar({ progress, direction, width = 20 }: { progress: number; direction: string; width?: number }) {
+  const filled = Math.round(Math.min(progress, 1) * width);
+  const empty = width - filled;
+
+  const barColor = progress >= 0.8 ? 'text-amber' : direction === 'up' ? 'text-matrix-green' : direction === 'down' ? 'text-hot-pink' : 'text-term-dim';
 
   return (
-    <div className="bg-slate-800 rounded-lg p-4">
-      <div className="flex items-center gap-2 mb-4">
-        <Activity className="h-5 w-5 text-purple-400" />
-        <h2 className="text-lg font-semibold text-white">Hard Move Progress</h2>
-        <span className="text-xs text-slate-500 ml-auto">
-          Threshold: {(moveProgress[0]?.threshold * 100).toFixed(2)}%
-        </span>
-      </div>
+    <span className="font-mono text-xs">
+      [<span className={barColor}>{'█'.repeat(filled)}</span>
+      <span className="text-term-dim">{'░'.repeat(empty)}</span>]
+    </span>
+  );
+}
 
-      <div className="space-y-3">
-        {moveProgress.map((item) => (
-          <MoveProgressBar key={item.asset} data={item} />
-        ))}
-      </div>
+function MoveProgressRow({ data }: { data: MoveProgressType }) {
+  const { asset, currentMovePercent, direction, progress, durationSeconds } = data;
+  const movePercentDisplay = (Math.abs(currentMovePercent) * 100).toFixed(3);
+  const progressPercent = (Math.min(progress, 1) * 100).toFixed(0);
+
+  return (
+    <div className="flex items-center gap-2 py-1 text-xs font-mono">
+      {/* Asset */}
+      <span className="text-cyber-cyan w-8 font-semibold">{asset}</span>
+
+      {/* Direction indicator */}
+      <span className={clsx(
+        'w-20',
+        direction === 'up' && 'text-matrix-green',
+        direction === 'down' && 'text-hot-pink',
+        direction === 'flat' && 'text-term-dim'
+      )}>
+        {direction === 'up' && `▲ +${movePercentDisplay}%`}
+        {direction === 'down' && `▼ -${movePercentDisplay}%`}
+        {direction === 'flat' && `— 0.000%`}
+      </span>
+
+      {/* Progress bar */}
+      <AsciiProgressBar progress={progress} direction={direction} width={15} />
+
+      {/* Progress percentage */}
+      <span className={clsx(
+        'w-10 text-right num-fixed',
+        progress >= 0.8 ? 'text-amber' : 'text-term-muted'
+      )}>
+        {progressPercent}%
+      </span>
+
+      {/* Duration */}
+      <span className="text-term-dim w-10 text-right">{durationSeconds.toFixed(0)}s</span>
     </div>
   );
 }
 
-function MoveProgressBar({ data }: { data: MoveProgressType }) {
-  const { asset, currentMovePercent, direction, progress, durationSeconds } = data;
-
-  const getDirectionIcon = () => {
-    if (direction === 'up') return <ArrowUp className="h-4 w-4 text-emerald-400" />;
-    if (direction === 'down') return <ArrowDown className="h-4 w-4 text-red-400" />;
-    return <Minus className="h-4 w-4 text-slate-400" />;
-  };
-
-  const getProgressBarColor = () => {
-    if (progress >= 0.8) return 'bg-yellow-500'; // Almost there!
-    if (direction === 'up') return 'bg-emerald-500/70';
-    if (direction === 'down') return 'bg-red-500/70';
-    return 'bg-slate-600';
-  };
-
-  const progressPercent = Math.min(progress * 100, 100);
-  const movePercentDisplay = (Math.abs(currentMovePercent) * 100).toFixed(3);
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-sm">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-white w-10">{asset}</span>
-          {getDirectionIcon()}
-          <span className={direction === 'up' ? 'text-emerald-400' : direction === 'down' ? 'text-red-400' : 'text-slate-400'}>
-            {direction === 'flat' ? '0.000' : (direction === 'up' ? '+' : '-')}{movePercentDisplay}%
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-slate-400">
-          <span className="text-xs">{durationSeconds.toFixed(0)}s</span>
-          <span className="text-xs font-mono w-12 text-right">
-            {progressPercent.toFixed(0)}%
-          </span>
+export function MoveProgress({ moveProgress }: MoveProgressProps) {
+  if (!moveProgress || moveProgress.length === 0) {
+    return (
+      <div className="terminal-panel">
+        <div className="terminal-header">MOVE TRACKER</div>
+        <div className="text-center py-4">
+          <div className="text-term-dim text-sm">[ AWAITING PRICE DATA ]</div>
         </div>
       </div>
+    );
+  }
 
-      {/* Progress bar */}
-      <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-300 ${getProgressBarColor()}`}
-          style={{ width: `${progressPercent}%` }}
-        />
+  const threshold = moveProgress[0]?.threshold ?? 0.02;
+
+  return (
+    <div className="terminal-panel">
+      <div className="flex items-center justify-between mb-2">
+        <div className="terminal-header">MOVE TRACKER</div>
+        <span className="text-term-dim text-xs font-mono">THR: {(threshold * 100).toFixed(1)}%</span>
+      </div>
+
+      <div className="space-y-0">
+        {moveProgress.map((item) => (
+          <MoveProgressRow key={item.asset} data={item} />
+        ))}
       </div>
     </div>
   );

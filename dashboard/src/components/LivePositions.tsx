@@ -1,4 +1,3 @@
-import { TrendingUp, TrendingDown, Clock } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { Position } from '../types';
 
@@ -7,12 +6,10 @@ interface LivePositionsProps {
 }
 
 function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
+  return value.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(value);
+  });
 }
 
 function formatPercent(value: number): string {
@@ -24,100 +21,86 @@ function formatHoldTime(entryTime: number): string {
   const diff = now - entryTime;
   const minutes = Math.floor(diff / 60000);
   const seconds = Math.floor((diff % 60000) / 1000);
-  return `${minutes}m ${seconds}s`;
-}
-
-function PositionCard({ position }: { position: Position }) {
-  const isProfitable = position.unrealizedPnl >= 0;
-  const isUp = position.signal.direction === 'up';
-
-  return (
-    <div className="card hover:border-slate-600 transition-colors">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-white">{position.signal.asset}</span>
-          <span className={clsx('badge', isUp ? 'badge-green' : 'badge-red')}>
-            {isUp ? <TrendingUp className="h-3 w-3 mr-1" /> : <TrendingDown className="h-3 w-3 mr-1" />}
-            {position.signal.direction.toUpperCase()}
-          </span>
-          <span className={clsx('badge', position.side === 'YES' ? 'badge-blue' : 'badge-yellow')}>
-            {position.side}
-          </span>
-        </div>
-        <div className="flex items-center gap-1 text-xs text-slate-400">
-          <Clock className="h-3 w-3" />
-          {formatHoldTime(position.entryTime)}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4 text-sm">
-        <div>
-          <p className="text-slate-400 text-xs">Entry Price</p>
-          <p className="text-white font-medium">{position.entryPrice.toFixed(4)}</p>
-        </div>
-        <div>
-          <p className="text-slate-400 text-xs">Current Price</p>
-          <p className="text-white font-medium">{position.currentPrice.toFixed(4)}</p>
-        </div>
-        <div>
-          <p className="text-slate-400 text-xs">Size</p>
-          <p className="text-white font-medium">{position.size.toFixed(2)}</p>
-        </div>
-        <div>
-          <p className="text-slate-400 text-xs">Cost Basis</p>
-          <p className="text-white font-medium">{formatCurrency(position.costBasis)}</p>
-        </div>
-      </div>
-
-      <div className="mt-4 pt-3 border-t border-slate-700">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-slate-400 text-xs">Unrealized P&L</p>
-            <p className={clsx('text-lg font-bold', isProfitable ? 'text-emerald-400' : 'text-red-400')}>
-              {formatCurrency(position.unrealizedPnl)}
-            </p>
-          </div>
-          <div
-            className={clsx(
-              'px-3 py-1 rounded-lg text-sm font-medium',
-              isProfitable ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
-            )}
-          >
-            {formatPercent(position.unrealizedPnlPercent)}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-2 text-xs text-slate-500">
-        Gap: {(position.signal.gap * 100).toFixed(2)}% | Confidence: {(position.signal.confidence * 100).toFixed(0)}%
-      </div>
-    </div>
-  );
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 export function LivePositions({ positions }: LivePositionsProps) {
   if (positions.length === 0) {
     return (
-      <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Live Positions</h2>
-        <div className="text-center py-8 text-slate-400">
-          <TrendingUp className="h-12 w-12 mx-auto mb-2 opacity-50" />
-          <p>No open positions</p>
-          <p className="text-sm">Waiting for trading signals...</p>
+      <div className="terminal-panel">
+        <div className="terminal-header">POSITIONS</div>
+        <div className="text-center py-6">
+          <div className="text-term-dim text-sm">[ NO ACTIVE POSITIONS ]</div>
+          <div className="text-term-muted text-xs mt-1">Waiting for signals...</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div>
-      <h2 className="text-lg font-semibold text-white mb-4">
-        Live Positions ({positions.length})
-      </h2>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {positions.map((position) => (
-          <PositionCard key={position.id} position={position} />
-        ))}
+    <div className="terminal-panel">
+      <div className="terminal-header">POSITIONS [{positions.length}]</div>
+      <div className="overflow-x-auto">
+        <table className="terminal-table">
+          <thead>
+            <tr>
+              <th>ASSET</th>
+              <th>DIR</th>
+              <th>SIDE</th>
+              <th className="text-right">ENTRY</th>
+              <th className="text-right">CURRENT</th>
+              <th className="text-right">SIZE</th>
+              <th className="text-right">COST</th>
+              <th className="text-right">P&L</th>
+              <th className="text-right">%</th>
+              <th className="text-right">TIME</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((pos) => {
+              const isProfitable = pos.unrealizedPnl >= 0;
+              const isUp = pos.signal.direction === 'up';
+
+              return (
+                <tr key={pos.id} className="hover:bg-term-panel/50">
+                  <td className="text-term-text font-semibold">{pos.signal.asset}</td>
+                  <td>
+                    <span className={clsx(isUp ? 'text-matrix-green' : 'text-hot-pink')}>
+                      {isUp ? '▲ UP' : '▼ DN'}
+                    </span>
+                  </td>
+                  <td>
+                    <span className={clsx('badge text-xs', pos.side === 'YES' ? 'badge-cyan' : 'badge-amber')}>
+                      {pos.side}
+                    </span>
+                  </td>
+                  <td className="text-right num-fixed text-term-text">{pos.entryPrice.toFixed(4)}</td>
+                  <td className="text-right num-fixed text-term-text">{pos.currentPrice.toFixed(4)}</td>
+                  <td className="text-right num-fixed text-term-muted">{pos.size.toFixed(2)}</td>
+                  <td className="text-right num-fixed text-term-muted">${formatCurrency(pos.costBasis)}</td>
+                  <td className={clsx('text-right num-fixed font-semibold', isProfitable ? 'text-profit' : 'text-loss')}>
+                    {isProfitable ? '+' : ''}${formatCurrency(pos.unrealizedPnl)}
+                  </td>
+                  <td className={clsx('text-right num-fixed', isProfitable ? 'text-profit' : 'text-loss')}>
+                    {formatPercent(pos.unrealizedPnlPercent)}
+                  </td>
+                  <td className="text-right num-fixed text-term-dim">{formatHoldTime(pos.entryTime)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Position Details Footer */}
+      <div className="mt-3 pt-3 border-t border-term-border text-xs text-term-dim flex justify-between">
+        <div className="flex gap-4">
+          {positions.map((pos) => (
+            <span key={pos.id}>
+              {pos.signal.asset}: gap={((pos.signal.gap) * 100).toFixed(1)}% conf={((pos.signal.confidence) * 100).toFixed(0)}%
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   );

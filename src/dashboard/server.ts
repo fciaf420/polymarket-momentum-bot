@@ -151,6 +151,7 @@ export class DashboardServer {
           maxHoldMinutes: number;
           exitGapThreshold: number;
           maxDrawdown: number;
+          maxEntrySlippage: number;
         }>;
 
         // Validate updates
@@ -179,6 +180,9 @@ export class DashboardServer {
         if (updates.maxDrawdown !== undefined && (updates.maxDrawdown <= 0 || updates.maxDrawdown > 1)) {
           errors.push('maxDrawdown must be between 0 and 1');
         }
+        if (updates.maxEntrySlippage !== undefined && (updates.maxEntrySlippage < 0 || updates.maxEntrySlippage > 1)) {
+          errors.push('maxEntrySlippage must be between 0 and 1');
+        }
 
         if (errors.length > 0) {
           res.status(400).json({ success: false, errors });
@@ -194,6 +198,7 @@ export class DashboardServer {
         if (updates.maxHoldMinutes !== undefined) this.config.maxHoldMinutes = updates.maxHoldMinutes;
         if (updates.exitGapThreshold !== undefined) this.config.exitGapThreshold = updates.exitGapThreshold;
         if (updates.maxDrawdown !== undefined) this.config.maxDrawdown = updates.maxDrawdown;
+        if (updates.maxEntrySlippage !== undefined) this.config.maxEntrySlippage = updates.maxEntrySlippage;
 
         // Update .env file
         this.updateEnvFile(updates);
@@ -227,6 +232,23 @@ export class DashboardServer {
     this.app.post('/api/control/resume', (_req: Request, res: Response) => {
       this.stateAggregator.resume();
       res.json({ success: true, paused: false });
+    });
+
+    // Get on-chain data (balance and positions from blockchain)
+    this.app.get('/api/onchain', async (_req: Request, res: Response) => {
+      try {
+        const onchainData = await this.strategy.getOnChainData();
+        res.json(onchainData);
+      } catch (error) {
+        logger.error('Failed to fetch on-chain data', { error: (error as Error).message });
+        res.status(500).json({
+          error: (error as Error).message,
+          balance: 0,
+          positions: [],
+          timestamp: Date.now(),
+          source: 'error'
+        });
+      }
     });
 
     // Serve static files in production
@@ -479,6 +501,7 @@ export class DashboardServer {
       maxHoldMinutes: 'MAX_HOLD_MINUTES',
       exitGapThreshold: 'EXIT_GAP_THRESHOLD',
       maxDrawdown: 'MAX_DRAWDOWN',
+      maxEntrySlippage: 'MAX_ENTRY_SLIPPAGE',
     };
 
     for (const [key, value] of Object.entries(updates)) {

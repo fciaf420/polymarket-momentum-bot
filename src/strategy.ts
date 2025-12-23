@@ -27,7 +27,7 @@ import {
 } from './clients/index.js';
 import { detectHardMove, getMoveProgress } from './utils/volatility.js';
 import {
-  calculatePriceGap,
+  calculatePriceGapV2,
   generateId,
   normalizeSharePrice,
   formatPercent,
@@ -35,6 +35,7 @@ import {
 } from './utils/helpers.js';
 import logger, { logSignal, logTrade, logPosition, logRisk } from './utils/logger.js';
 import { TradeHistoryWriter } from './utils/csv.js';
+import { initTestSession, TestSessionRecorder } from './utils/test-session.js';
 
 /**
  * Strategy state and configuration
@@ -69,6 +70,9 @@ export class MomentumLagStrategy extends EventEmitter {
   // Trade history
   private tradeHistory: TradeHistoryWriter;
 
+  // Test session recorder for detailed execution analysis
+  private testSession: TestSessionRecorder | null = null;
+
   // Monitoring intervals
   private scanInterval: ReturnType<typeof setInterval> | null = null;
   private positionMonitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -81,9 +85,18 @@ export class MomentumLagStrategy extends EventEmitter {
   private pendingExecutions: Set<string> = new Set(); // conditionIds with in-flight orders
   private failedMarkets: Map<string, number> = new Map(); // conditionId -> cooldown until timestamp
 
+  // Recently closed positions - prevent re-adding as orphans during Data API sync lag
+  private recentlyClosedPositions: Map<string, number> = new Map(); // conditionId -> closed timestamp
+  private readonly POSITION_COOLDOWN_MS = 30000; // 30 second cooldown after close
+
   // Signal cooldown to prevent duplicate signals for same opportunity
   private lastSignal: Map<CryptoAsset, { direction: 'up' | 'down'; timestamp: number }> = new Map();
   private readonly SIGNAL_COOLDOWN_MS = 5000; // 5 second cooldown per asset+direction
+
+  // Warm-up mode tracking - only trade markets discovered fresh (not mid-window)
+  private warmupMarkets: Set<string> = new Set(); // conditionIds discovered at startup (monitor only)
+  private warmupComplete: boolean = false; // True once all startup markets have expired
+  private startupTimestamp: number = 0; // When bot started
 
   constructor(config: Config) {
     super();
@@ -173,6 +186,13 @@ export class MomentumLagStrategy extends EventEmitter {
         dryRun: this.config.dryRun,
       });
 
+      // Initialize test session recorder for detailed execution analysis
+      this.testSession = initTestSession(this.config);
+      logger.info('Test session recorder initialized', {
+        filePath: this.testSession.getFilePath(),
+        positionSizePct: formatPercent(this.config.positionSizePct),
+      });
+
       // Connect to WebSockets
       const wsConnections = [this.polymarketWs.connect()];
       if (this.config.binanceFallbackEnabled) {
@@ -238,6 +258,27 @@ export class MomentumLagStrategy extends EventEmitter {
 
     this.state.isRunning = false;
     logger.info('Strategy stopped');
+
+    // Finalize test session and log detailed summary
+    if (this.testSession) {
+      const sessionSummary = this.testSession.finalize();
+      logger.info('=== TEST SESSION SUMMARY ===', {
+        durationMinutes: sessionSummary.durationMinutes.toFixed(1),
+        signalsDetected: sessionSummary.signalsDetected,
+        signalsExecuted: sessionSummary.signalsExecuted,
+        ordersSubmitted: sessionSummary.ordersSubmitted,
+        ordersFilled: sessionSummary.ordersFilled,
+        ordersFailed: sessionSummary.ordersFailed,
+        positionsOpened: sessionSummary.positionsOpened,
+        positionsClosed: sessionSummary.positionsClosed,
+        orphanedHandled: sessionSummary.orphanedPositionsHandled,
+        totalPnl: formatCurrency(sessionSummary.totalPnl),
+        winCount: sessionSummary.winCount,
+        lossCount: sessionSummary.lossCount,
+        avgLatencyMs: sessionSummary.avgLatencyMs.toFixed(0),
+        avgSlippage: formatPercent(sessionSummary.avgSlippage),
+      });
+    }
 
     // Log summary
     this.logSessionSummary();
@@ -337,13 +378,82 @@ export class MomentumLagStrategy extends EventEmitter {
    * Handle markets update from discovery
    */
   private handleMarketsUpdate(markets: CryptoMarket[]): void {
+    // Track warm-up mode: on startup, mark all discovered markets as warm-up only
+    // We only trade markets discovered fresh (after startup markets expire)
+    const isFirstUpdate = this.startupTimestamp === 0;
+    if (isFirstUpdate) {
+      this.startupTimestamp = Date.now();
+      // Mark all initial markets as warm-up (monitor but don't trade)
+      for (const market of markets) {
+        this.warmupMarkets.add(market.conditionId);
+      }
+      if (markets.length > 0) {
+        logger.info('=== WARM-UP MODE STARTED ===', {
+          warmupMarkets: markets.length,
+          reason: 'Waiting for fresh 15m markets to start trading',
+          assets: markets.map(m => m.asset).join(', '),
+          conditionIds: markets.map(m => `${m.asset}:${m.conditionId.substring(0, 8)}`).join(', '),
+        });
+      } else {
+        // No markets at startup - lucky timing, skip warm-up
+        this.warmupComplete = true;
+        logger.info('=== CLEAN START - NO WARM-UP NEEDED ===', {
+          reason: 'No active markets at startup, will trade first fresh markets',
+        });
+      }
+    } else if (!this.warmupComplete) {
+      // Check if any warm-up markets are still active
+      const activeWarmupMarkets = markets.filter(m => this.warmupMarkets.has(m.conditionId));
+      const newFreshMarkets = markets.filter(m => !this.warmupMarkets.has(m.conditionId));
+
+      if (activeWarmupMarkets.length === 0 && newFreshMarkets.length > 0) {
+        // All warm-up markets expired, new fresh markets available - transition to active trading
+        this.warmupComplete = true;
+        logger.info('=== WARM-UP COMPLETE - ACTIVE TRADING ENABLED ===', {
+          freshMarkets: newFreshMarkets.length,
+          assets: newFreshMarkets.map(m => m.asset).join(', '),
+          conditionIds: newFreshMarkets.map(m => `${m.asset}:${m.conditionId.substring(0, 8)}`).join(', '),
+          warmupDurationSeconds: Math.round((Date.now() - this.startupTimestamp) / 1000),
+        });
+      } else if (newFreshMarkets.length > 0) {
+        // Some fresh markets appeared but old warm-up markets still active
+        // NOTE: Fresh markets are still tradeable via the check at line ~870!
+        logger.info('Fresh markets available (warmup markets still tracked)', {
+          warmupRemaining: activeWarmupMarkets.length,
+          warmupAssets: activeWarmupMarkets.map(m => m.asset).join(', '),
+          freshAvailable: newFreshMarkets.length,
+          freshAssets: newFreshMarkets.map(m => m.asset).join(', '),
+          freshConditionIds: newFreshMarkets.map(m => `${m.asset}:${m.conditionId.substring(0, 8)}`).join(', '),
+          note: 'Fresh markets ARE tradeable now',
+        });
+      }
+    }
+
     // Clear both maps to ensure fresh data for new markets
     // This is critical when markets expire and new ones are discovered
     this.activeMarkets.clear();
     this.marketPrices.clear();
 
     for (const market of markets) {
-      this.activeMarkets.set(market.conditionId, market);
+      // Calculate window start time (expiry - 15 minutes)
+      const expiryMs = market.expiryTime instanceof Date
+        ? market.expiryTime.getTime()
+        : new Date(market.expiryTime).getTime();
+      const windowStartTime = expiryMs - (15 * 60 * 1000);
+
+      // Capture current crypto price as window start price
+      // (This is approximate - ideally we'd get the exact price at window start)
+      const priceData = this.cryptoPrices.get(market.asset);
+      const windowStartCryptoPrice = priceData?.price;
+
+      // Augment market with window tracking data
+      const augmentedMarket: CryptoMarket = {
+        ...market,
+        windowStartTime,
+        windowStartCryptoPrice,
+      };
+
+      this.activeMarkets.set(market.conditionId, augmentedMarket);
 
       // Initialize market prices from token data (live prices from CLOB /midpoint API)
       let upPrice = 0.5;
@@ -517,6 +627,18 @@ export class MomentumLagStrategy extends EventEmitter {
                 continue;
               }
 
+              // Check if this position was recently closed - Data API may lag behind actual state
+              const closedTimestamp = this.recentlyClosedPositions.get(market.conditionId);
+              if (closedTimestamp && (now - closedTimestamp) < this.POSITION_COOLDOWN_MS) {
+                logger.debug('Skipping orphaned position - recently closed (Data API lag)', {
+                  asset: market.asset,
+                  tokenId: onChainPos.asset_id.substring(0, 20),
+                  closedSecondsAgo: ((now - closedTimestamp) / 1000).toFixed(0),
+                  cooldownMs: this.POSITION_COOLDOWN_MS,
+                });
+                continue;
+              }
+
               const side = market.upTokenId === onChainPos.asset_id ? 'UP' : 'DOWN';
               const avgPrice = parseFloat(onChainPos.avg_entry_price) || 0.5;
 
@@ -528,10 +650,11 @@ export class MomentumLagStrategy extends EventEmitter {
                 tokenId: onChainPos.asset_id.substring(0, 20),
               });
 
-              // Create a synthetic position for tracking
+              // Create a synthetic position for tracking (marked as orphaned)
               const position: Position = {
                 id: generateId(),
                 market,
+                isOrphaned: true, // Mark as orphaned - will be excluded from trade stats
                 signal: {
                   id: 'orphan-' + generateId(),
                   timestamp: Date.now(),
@@ -749,6 +872,44 @@ export class MomentumLagStrategy extends EventEmitter {
           checks.push({ name: 'No Existing Position', status: 'passed' });
         }
 
+        // CHECK 6.5: Warm-up mode check - don't trade markets discovered at startup
+        const isInWarmupSet = this.warmupMarkets.has(market.conditionId);
+        if (!blocked && !this.warmupComplete && isInWarmupSet) {
+          const warmupElapsed = Math.round((Date.now() - this.startupTimestamp) / 1000);
+          logger.info('Signal BLOCKED by warm-up', {
+            asset,
+            conditionId: market.conditionId.substring(0, 12) + '...',
+            warmupComplete: this.warmupComplete,
+            isInWarmupSet,
+            warmupSetSize: this.warmupMarkets.size,
+            warmupElapsed: `${warmupElapsed}s`,
+          });
+          checks.push({
+            name: 'Warm-up Mode',
+            status: 'failed',
+            value: `${warmupElapsed}s since startup`,
+            reason: 'Market discovered mid-window, waiting for fresh market',
+          });
+          blockReason = 'Warm-up mode - waiting for fresh market';
+          blocked = true;
+        } else if (!blocked) {
+          // Fresh market or warmup complete - allowed to trade
+          logger.debug('Warm-up check passed', {
+            asset,
+            conditionId: market.conditionId.substring(0, 12) + '...',
+            warmupComplete: this.warmupComplete,
+            isInWarmupSet,
+            reason: this.warmupComplete ? 'Warmup complete' : 'Fresh market (not in warmup set)',
+          });
+          checks.push({
+            name: 'Warm-up Mode',
+            status: 'passed',
+            value: this.warmupComplete ? 'Complete' : 'Fresh market',
+          });
+        } else {
+          checks.push({ name: 'Warm-up Mode', status: 'skipped' });
+        }
+
         // CHECK 7: Market data available
         const marketData = !blocked ? this.marketPrices.get(market.conditionId) : null;
 
@@ -779,33 +940,47 @@ export class MomentumLagStrategy extends EventEmitter {
             value: `UP ${formatPercent(marketData.upPrice)} / DN ${formatPercent(marketData.downPrice)}`,
           });
 
-          // CHECK 8: Gap threshold
-          logger.debug('Gap calc inputs', {
+          // CHECK 8: Gap threshold using TOTAL WINDOW MOVE
+          // The reference price is the crypto price at window start (expiry - 15 min)
+          // We compare current price to reference to determine total move
+          const referencePrice = market.windowStartCryptoPrice;
+          const currentCryptoPrice = priceData!.price;
+
+          // Calculate total window move (current vs reference price)
+          let totalWindowMove = 0;
+          if (referencePrice && referencePrice > 0) {
+            totalWindowMove = (currentCryptoPrice - referencePrice) / referencePrice;
+          }
+
+          logger.debug('Gap calc inputs (V2 - Total Window Move)', {
             asset,
-            movePercent: (move.movePercent * 100).toFixed(2) + '%',
-            moveDirection: move.direction,
+            referencePrice: referencePrice?.toFixed(2) ?? 'N/A',
+            currentCryptoPrice: currentCryptoPrice.toFixed(2),
+            totalWindowMove: (totalWindowMove * 100).toFixed(2) + '%',
+            recentMove: (move.movePercent * 100).toFixed(2) + '%',
             upImpliedProb: (marketData.upImpliedProb * 100).toFixed(1) + '%',
             downImpliedProb: (marketData.downImpliedProb * 100).toFixed(1) + '%',
           });
 
-          const gapResult = calculatePriceGap(
+          // Use new gap calculation based on total window move
+          const gapResult = calculatePriceGapV2(
+            totalWindowMove,
             move.movePercent,
             marketData.upImpliedProb,
             marketData.downImpliedProb,
             this.config.moveThreshold
           );
 
-          const absMove = Math.abs(move.movePercent);
-          const expectedPrice = Math.min(0.5 + absMove * 5, 0.95);
-          const currentProb = move.direction === 'up' ? marketData.upImpliedProb : marketData.downImpliedProb;
+          const expectedPrice = gapResult.expectedProb;
+          const currentProb = gapResult.direction === 'UP' ? marketData.upImpliedProb : marketData.downImpliedProb;
           const rawGap = expectedPrice - currentProb;
 
           // Log at debug level when gap is 0 (too spammy at info)
           if (gapResult.gap === 0) {
             logger.debug('Gap is ZERO', {
               asset,
-              movePercent: (move.movePercent * 100).toFixed(2) + '%',
-              moveDirection: move.direction,
+              totalWindowMove: (totalWindowMove * 100).toFixed(2) + '%',
+              recentMove: (move.movePercent * 100).toFixed(2) + '%',
               moveThreshold: (this.config.moveThreshold * 100).toFixed(2) + '%',
               moveExceedsThreshold: Math.abs(move.movePercent) > this.config.moveThreshold,
               upImpliedProb: (marketData.upImpliedProb * 100).toFixed(1) + '%',
@@ -816,8 +991,9 @@ export class MomentumLagStrategy extends EventEmitter {
               reason: rawGap <= 0 ? 'Market already at or above expected price' : 'Move below threshold',
             });
           } else {
-            logger.debug('Gap calc result', {
+            logger.debug('Gap calc result (V2)', {
               asset,
+              totalWindowMove: (totalWindowMove * 100).toFixed(2) + '%',
               expectedPrice: (expectedPrice * 100).toFixed(1) + '%',
               currentProb: (currentProb * 100).toFixed(1) + '%',
               rawGap: (rawGap * 100).toFixed(1) + '%',
@@ -924,6 +1100,11 @@ export class MomentumLagStrategy extends EventEmitter {
                 market: market.marketSlug,
               });
 
+              // Record signal to test session
+              if (this.testSession) {
+                this.testSession.recordSignal(signal);
+              }
+
               // Emit signal event for dashboard WebSocket
               this.emit('signalDetected', signal);
 
@@ -1012,25 +1193,62 @@ export class MomentumLagStrategy extends EventEmitter {
     this.pendingExecutions.add(conditionId);
 
     try {
-      // Calculate position size
+      // Calculate position size based on bankroll percentage from .env
       const positionValue = this.state.accountBalance * this.config.positionSizePct;
+      const signalTimestamp = signal.timestamp; // When signal was first detected
 
       logger.info('Executing signal', {
         asset: signal.asset,
         side: signal.suggestedSide,
         positionValue: formatCurrency(positionValue),
-        entryPrice: signal.entryPrice.toFixed(4),
+        bankrollPct: formatPercent(this.config.positionSizePct),
+        signalPrice: signal.entryPrice.toFixed(4),
+        gap: formatPercent(signal.gapPercent),
+        confidence: formatPercent(signal.confidence),
       });
 
-      // Place market buy order
-      const order = await this.clobClient.marketBuy(
+      // Capture order submission time
+      const orderSubmitTimestamp = Date.now();
+
+      // Record order submission to test session
+      if (this.testSession) {
+        this.testSession.recordOrderSubmitted(
+          signal.asset,
+          signal.suggestedSide,
+          'BUY',
+          positionValue,
+          signal.entryPrice
+        );
+      }
+
+      // Place FAK (Fill-And-Kill / IOC) limit buy order with slippage tolerance
+      // This allows partial fills up to maxEntrySlippage above signal price
+      // Better than FOK which fails entirely if order can't be 100% filled
+      const maxLimitPrice = signal.entryPrice * (1 + this.config.maxEntrySlippage);
+      logger.debug('FAK order with slippage cap', {
+        signalPrice: signal.entryPrice.toFixed(4),
+        maxSlippage: (this.config.maxEntrySlippage * 100).toFixed(1) + '%',
+        maxLimitPrice: maxLimitPrice.toFixed(4),
+      });
+      const order = await this.clobClient.limitBuyFAK(
         signal.tokenId,
         positionValue,
+        maxLimitPrice,  // Use signal price + slippage tolerance as limit
         signal.market
       );
 
       if (order.status === 'failed') {
         logger.error('Failed to execute signal', { signal: signal.id });
+        // Record order failure to test session
+        if (this.testSession) {
+          this.testSession.recordOrderFailed(
+            signal.asset,
+            signal.suggestedSide,
+            'BUY',
+            positionValue,
+            order.failureReason || 'unknown'
+          );
+        }
         // Add 30 second cooldown for this market
         this.failedMarkets.set(conditionId, Date.now() + 30000);
         return;
@@ -1039,14 +1257,45 @@ export class MomentumLagStrategy extends EventEmitter {
       // Clear any previous failure cooldown on success
       this.failedMarkets.delete(conditionId);
 
-      // Create position
+      // Calculate execution metrics
+      const fillTimestamp = Date.now();
+      const orderLatencyMs = fillTimestamp - signalTimestamp;
+      const slippage = signal.entryPrice > 0
+        ? (order.avgFillPrice - signal.entryPrice) / signal.entryPrice
+        : 0;
+
+      logger.info('Order filled', {
+        asset: signal.asset,
+        side: signal.suggestedSide,
+        expectedPrice: signal.entryPrice.toFixed(4),
+        fillPrice: order.avgFillPrice.toFixed(4),
+        slippage: (slippage * 100).toFixed(2) + '%',
+        latencyMs: orderLatencyMs,
+        filledSize: order.filledSize.toFixed(2),
+      });
+
+      // Record order fill to test session
+      if (this.testSession) {
+        this.testSession.recordOrderFilled(
+          signal.asset,
+          signal.suggestedSide,
+          'BUY',
+          positionValue,
+          order.filledSize,
+          signal.entryPrice,
+          order.avgFillPrice,
+          orderLatencyMs
+        );
+      }
+
+      // Create position with timing data
       const position: Position = {
         id: generateId(),
         market: signal.market,
         tokenId: signal.tokenId,
         side: signal.suggestedSide,
         entryPrice: order.avgFillPrice,
-        entryTimestamp: Date.now(),
+        entryTimestamp: fillTimestamp,
         size: order.filledSize,
         costBasis: order.avgFillPrice * order.filledSize,
         currentPrice: order.avgFillPrice,
@@ -1055,6 +1304,9 @@ export class MomentumLagStrategy extends EventEmitter {
         unrealizedPnlPercent: 0,
         signal,
         status: 'open',
+        isOrphaned: false,
+        signalTimestamp,
+        orderSubmitTimestamp,
       };
 
       this.state.positions.set(conditionId, position);
@@ -1068,6 +1320,11 @@ export class MomentumLagStrategy extends EventEmitter {
       });
 
       this.emit('positionOpened', position);
+
+      // Record position opened to test session
+      if (this.testSession) {
+        this.testSession.recordPositionOpened(position);
+      }
 
     } catch (error) {
       logger.error('Error executing signal', {
@@ -1129,7 +1386,16 @@ export class MomentumLagStrategy extends EventEmitter {
       let exitReason: ExitReason = 'gap_closed';
 
       // 1. Gap has closed (market caught up)
-      const currentGap = calculatePriceGap(
+      // Use total window move for gap calculation
+      const referencePrice = position.market.windowStartCryptoPrice;
+      const currentCryptoPrice = priceData.price;
+      let totalWindowMove = 0;
+      if (referencePrice && referencePrice > 0) {
+        totalWindowMove = (currentCryptoPrice - referencePrice) / referencePrice;
+      }
+
+      const currentGap = calculatePriceGapV2(
+        totalWindowMove,
         position.signal.priceMove.movePercent,
         marketData.upImpliedProb,
         marketData.downImpliedProb,
@@ -1191,7 +1457,8 @@ export class MomentumLagStrategy extends EventEmitter {
     });
 
     try {
-      // Place market sell order
+      // Market sell to ensure we can always exit
+      // FOK for exits caused issues when liquidity was thin near expiry
       const order = await this.clobClient.marketSell(
         position.tokenId,
         position.size,
@@ -1216,6 +1483,10 @@ export class MomentumLagStrategy extends EventEmitter {
 
           this.state.positions.delete(position.market.conditionId);
           this.emit('positionClosed', position);
+          // Record position closed to test session
+          if (this.testSession) {
+            this.testSession.recordPositionClosed(position);
+          }
           return;
         }
 
@@ -1248,6 +1519,17 @@ export class MomentumLagStrategy extends EventEmitter {
       // Remove from active positions
       this.state.positions.delete(position.market.conditionId);
 
+      // Track this position as recently closed to prevent orphan re-add spam
+      this.recentlyClosedPositions.set(position.market.conditionId, Date.now());
+
+      // Clean up old entries from recentlyClosedPositions (older than 2x cooldown)
+      const cleanupThreshold = Date.now() - (this.POSITION_COOLDOWN_MS * 2);
+      for (const [cid, closedTime] of this.recentlyClosedPositions) {
+        if (closedTime < cleanupThreshold) {
+          this.recentlyClosedPositions.delete(cid);
+        }
+      }
+
       logTrade({
         action: 'EXIT',
         asset: position.signal.asset,
@@ -1261,6 +1543,11 @@ export class MomentumLagStrategy extends EventEmitter {
       this.recordTrade(position);
 
       this.emit('positionClosed', position);
+
+      // Record position closed to test session
+      if (this.testSession) {
+        this.testSession.recordPositionClosed(position);
+      }
 
     } catch (error) {
       logger.error('Error closing position', {
@@ -1288,7 +1575,34 @@ export class MomentumLagStrategy extends EventEmitter {
    * Record trade to history
    */
   private recordTrade(position: Position): void {
+    // Skip recording orphaned positions - they pollute stats with fake signal values
+    if (position.isOrphaned) {
+      logger.info('Skipping trade record for orphaned position', {
+        asset: position.signal.asset,
+        side: position.side,
+        pnl: position.realizedPnl?.toFixed(2),
+      });
+      return;
+    }
+
     const holdTimeMinutes = (position.exitTimestamp! - position.entryTimestamp) / (60 * 1000);
+
+    // Calculate execution metrics
+    const orderLatencyMs = position.signalTimestamp
+      ? position.entryTimestamp - position.signalTimestamp
+      : undefined;
+
+    const slippage = position.signal.entryPrice > 0
+      ? (position.entryPrice - position.signal.entryPrice) / position.signal.entryPrice
+      : undefined;
+
+    // Get market spread at entry if available
+    const marketData = this.marketPrices.get(position.market.conditionId);
+    const marketSpreadAtEntry = marketData
+      ? (position.side === 'UP'
+          ? marketData.bestAskUp - marketData.bestBidUp
+          : marketData.bestAskDown - marketData.bestBidDown)
+      : undefined;
 
     const record: TradeRecord = {
       timestamp: new Date(position.exitTimestamp!).toISOString(),
@@ -1306,6 +1620,12 @@ export class MomentumLagStrategy extends EventEmitter {
       exitReason: position.exitReason!,
       signalGap: position.signal.gapPercent,
       signalConfidence: position.signal.confidence,
+      // Debug fields
+      isOrphaned: position.isOrphaned || false,
+      orderLatencyMs,
+      slippage,
+      expectedPrice: position.signal.entryPrice,
+      marketSpreadAtEntry,
     };
 
     this.tradeHistory.write(record);
@@ -1476,6 +1796,48 @@ export class MomentumLagStrategy extends EventEmitter {
     }
 
     return result;
+  }
+
+  /**
+   * Get on-chain data directly from blockchain
+   * Fetches real balance and positions from Polymarket Data API
+   */
+  public async getOnChainData(): Promise<{
+    balance: number;
+    positions: Array<{
+      tokenId: string;
+      size: number;
+      avgEntryPrice: number;
+      currentValue: number;
+    }>;
+    timestamp: number;
+    source: 'onchain';
+  }> {
+    try {
+      // Fetch on-chain balance
+      const balance = await this.clobClient.getBalance();
+
+      // Fetch on-chain positions from Data API
+      const rawPositions = await this.clobClient.getPositions();
+
+      // Transform positions
+      const positions = rawPositions.map(p => ({
+        tokenId: p.asset_id,
+        size: parseFloat(p.size),
+        avgEntryPrice: parseFloat(p.avg_entry_price),
+        currentValue: parseFloat(p.size) * parseFloat(p.avg_entry_price),
+      }));
+
+      return {
+        balance,
+        positions,
+        timestamp: Date.now(),
+        source: 'onchain',
+      };
+    } catch (error) {
+      logger.error('Failed to fetch on-chain data', { error: (error as Error).message });
+      throw error;
+    }
   }
 
   /**

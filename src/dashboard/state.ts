@@ -113,12 +113,16 @@ export interface DashboardState {
       winRate: number;
       profitFactor: number;
       sharpeRatio: number;
+      averageWin: number;
+      averageLoss: number;
     };
     limits: {
       maxDrawdown: number;
       maxPositions: number;
       maxPositionSize: number;
       minLiquidity: number;
+      maxDailyLoss: number;
+      maxConcentration: number;
     };
   };
   trades: {
@@ -143,6 +147,7 @@ export interface DashboardState {
     maxHoldMinutes: number;
     exitGapThreshold: number;
     maxDrawdown: number;
+    maxEntrySlippage: number;
     backtest: boolean;
     dryRun: boolean;
   };
@@ -293,12 +298,16 @@ export class DashboardStateAggregator {
           winRate: riskMetrics.winRate,
           profitFactor: riskMetrics.profitFactor,
           sharpeRatio: riskMetrics.sharpeRatio,
+          averageWin: riskMetrics.averageWin,
+          averageLoss: riskMetrics.averageLoss,
         },
         limits: {
           maxDrawdown: riskLimits.maxDrawdown,
           maxPositions: riskLimits.maxPositions,
           maxPositionSize: riskLimits.maxPositionSize,
           minLiquidity: riskLimits.minLiquidity,
+          maxDailyLoss: riskLimits.maxDailyLoss,
+          maxConcentration: riskLimits.maxConcentration,
         },
       },
       trades: {
@@ -313,6 +322,7 @@ export class DashboardStateAggregator {
         maxHoldMinutes: this.config.maxHoldMinutes,
         exitGapThreshold: this.config.exitGapThreshold,
         maxDrawdown: this.config.maxDrawdown,
+        maxEntrySlippage: this.config.maxEntrySlippage,
         backtest: this.config.backtest,
         dryRun: this.config.dryRun,
       },
@@ -358,6 +368,7 @@ export class DashboardStateAggregator {
       maxHoldMinutes: this.config.maxHoldMinutes,
       exitGapThreshold: this.config.exitGapThreshold,
       maxDrawdown: this.config.maxDrawdown,
+      maxEntrySlippage: this.config.maxEntrySlippage,
       backtest: this.config.backtest,
       dryRun: this.config.dryRun,
     };

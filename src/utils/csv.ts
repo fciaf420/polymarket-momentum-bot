@@ -24,6 +24,12 @@ const CSV_HEADERS = [
   'exit_reason',
   'signal_gap',
   'signal_confidence',
+  // Debug columns for execution analysis
+  'is_orphaned',
+  'order_latency_ms',
+  'slippage',
+  'expected_price',
+  'market_spread_at_entry',
 ];
 
 /**
@@ -111,6 +117,12 @@ export class TradeHistoryWriter {
       trade.exitReason,
       trade.signalGap.toFixed(4),
       trade.signalConfidence.toFixed(4),
+      // Debug fields
+      trade.isOrphaned ? 'true' : 'false',
+      trade.orderLatencyMs?.toFixed(0) ?? '',
+      trade.slippage?.toFixed(4) ?? '',
+      trade.expectedPrice?.toFixed(6) ?? '',
+      trade.marketSpreadAtEntry?.toFixed(4) ?? '',
     ].map(v => this.escapeValue(v));
 
     const csvRow = row.join(',') + '\n';
@@ -149,7 +161,8 @@ export class TradeHistoryWriter {
     for (let i = 1; i < lines.length; i++) {
       const values = this.parseCsvLine(lines[i]);
 
-      if (values.length < CSV_HEADERS.length) {
+      // Need at least the core 15 columns (debug fields are optional for backwards compatibility)
+      if (values.length < 15) {
         continue;
       }
 
@@ -169,6 +182,12 @@ export class TradeHistoryWriter {
         exitReason: values[12] as TradeRecord['exitReason'],
         signalGap: parseFloat(values[13]),
         signalConfidence: parseFloat(values[14]),
+        // Debug fields (may not exist in older CSVs)
+        isOrphaned: values[15] === 'true',
+        orderLatencyMs: values[16] ? parseFloat(values[16]) : undefined,
+        slippage: values[17] ? parseFloat(values[17]) : undefined,
+        expectedPrice: values[18] ? parseFloat(values[18]) : undefined,
+        marketSpreadAtEntry: values[19] ? parseFloat(values[19]) : undefined,
       });
     }
 

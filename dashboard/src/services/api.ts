@@ -80,6 +80,20 @@ export const api = {
 
   // Resume bot
   resume: () => postJSON<{ success: boolean; paused: boolean }>('/control/resume'),
+
+  // Get on-chain data (balance and positions from blockchain)
+  getOnChainData: () => fetchJSON<{
+    balance: number;
+    positions: Array<{
+      tokenId: string;
+      size: number;
+      avgEntryPrice: number;
+      currentValue: number;
+    }>;
+    timestamp: number;
+    source: 'onchain' | 'error';
+    error?: string;
+  }>('/onchain'),
 };
 
 export default api;

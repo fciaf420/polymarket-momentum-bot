@@ -114,6 +114,8 @@ export function loadConfig(): Config {
     minLiquidity: parseNumber(getOptional('MIN_LIQUIDITY', '1000')),
     maxHoldMinutes: parseNumber(getOptional('MAX_HOLD_MINUTES', '12')),
     exitGapThreshold: parseNumber(getOptional('EXIT_GAP_THRESHOLD', '0.01')),
+    maxTradeUsd: parseNumber(getOptional('MAX_TRADE_USD', '1.05')), // $1.05 to avoid precision errors (CLOB min is $1)
+    maxEntrySlippage: parseNumber(getOptional('MAX_ENTRY_SLIPPAGE', '0.15')), // 15% max slippage above signal price
 
     // Risk
     maxDrawdown: parseNumber(getOptional('MAX_DRAWDOWN', '0.10')),

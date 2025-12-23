@@ -158,6 +158,74 @@ export function calculatePriceGap(
 }
 
 /**
+ * Calculate price gap based on TOTAL window move (not micro-moves)
+ *
+ * This is the correct approach: compare what the market SHOULD be pricing
+ * (based on total crypto move since window start) vs what it IS pricing.
+ *
+ * A real "lag" is when the market hasn't caught up to the total move.
+ *
+ * @param totalWindowMovePercent - Total crypto move since window opened (e.g., 0.02 = 2% up)
+ * @param recentMovePercent - Recent move in last 60 seconds (for triggering)
+ * @param upImpliedProb - Current UP market probability (0-1)
+ * @param downImpliedProb - Current DOWN market probability (0-1)
+ * @param moveThreshold - Minimum recent move to trigger (e.g., 0.02 = 2%)
+ */
+export function calculatePriceGapV2(
+  totalWindowMovePercent: number,
+  recentMovePercent: number,
+  upImpliedProb: number,
+  downImpliedProb: number,
+  moveThreshold: number
+): { gap: number; direction: MarketDirection; tokenSide: 'up' | 'down'; expectedProb: number } {
+  // Need a significant RECENT move to trigger (this is the "hard move" detection)
+  const absRecentMove = Math.abs(recentMovePercent);
+  if (absRecentMove < moveThreshold) {
+    return { gap: 0, direction: 'UP', tokenSide: 'up', expectedProb: 0.5 };
+  }
+
+  // Calculate expected probability based on TOTAL window move
+  // Using a sensitivity factor: 10x move = probability shift
+  // E.g., +2% total move → expected UP prob = 50% + 20% = 70%
+  // E.g., -3% total move → expected DOWN prob = 50% + 30% = 80%
+  const absTotalMove = Math.abs(totalWindowMovePercent);
+  const probShift = Math.min(absTotalMove * 10, 0.45); // Cap at 95%
+
+  if (totalWindowMovePercent > 0) {
+    // Crypto is UP for the window → UP shares should be expensive
+    const expectedUpProb = 0.5 + probShift;
+    const actualUpProb = upImpliedProb;
+
+    // Gap exists only if market is BEHIND (UP is cheaper than it should be)
+    const gap = expectedUpProb - actualUpProb;
+
+    return {
+      gap: Math.max(gap, 0),
+      direction: 'UP',
+      tokenSide: 'up',
+      expectedProb: expectedUpProb,
+    };
+  } else if (totalWindowMovePercent < 0) {
+    // Crypto is DOWN for the window → DOWN shares should be expensive
+    const expectedDownProb = 0.5 + probShift;
+    const actualDownProb = downImpliedProb;
+
+    // Gap exists only if market is BEHIND (DOWN is cheaper than it should be)
+    const gap = expectedDownProb - actualDownProb;
+
+    return {
+      gap: Math.max(gap, 0),
+      direction: 'DOWN',
+      tokenSide: 'down',
+      expectedProb: expectedDownProb,
+    };
+  }
+
+  // No significant move
+  return { gap: 0, direction: 'UP', tokenSide: 'up', expectedProb: 0.5 };
+}
+
+/**
  * Check if a market is still tradeable (not expired, not closed)
  * Note: Market parsing is now handled in MarketDiscoveryClient
  */

@@ -1,4 +1,4 @@
-import { Activity, Pause, Play, Wifi, WifiOff } from 'lucide-react';
+import { Pause, Play } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { DashboardState } from '../types';
 
@@ -15,19 +15,17 @@ function formatUptime(ms: number): string {
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
 
-  if (days > 0) return `${days}d ${hours % 24}h`;
-  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
   if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
   return `${seconds}s`;
 }
 
 function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
+  return value.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(value);
+  });
 }
 
 export function Header({ state, isConnected, onPause, onResume }: HeaderProps) {
@@ -35,142 +33,132 @@ export function Header({ state, isConnected, onPause, onResume }: HeaderProps) {
   const isRunning = state?.status.isRunning ?? false;
 
   return (
-    <header className="bg-slate-800/80 border-b border-slate-700 px-6 py-4">
+    <header className="bg-term-bg border-b border-cyber-cyan/30 px-4 py-3">
       <div className="flex items-center justify-between">
-        {/* Logo and Title */}
-        <div className="flex items-center gap-4">
+        {/* Logo and Status */}
+        <div className="flex items-center gap-6">
+          {/* Title */}
           <div className="flex items-center gap-2">
-            <Activity className="h-8 w-8 text-emerald-500" />
-            <div>
-              <h1 className="text-xl font-bold text-white">Polymarket Momentum Bot</h1>
-              <p className="text-xs text-slate-400">15-Minute Crypto Prediction Markets</p>
-            </div>
+            <span className="text-cyber-cyan text-lg font-bold tracking-wider">POLYMARKET</span>
+            <span className="text-term-muted text-lg">MOMENTUM</span>
+            <span className="text-term-dim text-xs ml-2">v1.0</span>
           </div>
 
-          {/* Status Badge */}
-          <div className="flex items-center gap-2 ml-4">
-            <span
-              className={clsx(
-                'badge',
-                isRunning && !isPaused && 'badge-green',
-                isPaused && 'badge-yellow',
-                !isRunning && 'badge-gray'
-              )}
-            >
-              {isPaused ? 'PAUSED' : isRunning ? 'RUNNING' : 'STOPPED'}
-            </span>
+          {/* Status Indicator */}
+          <div className="flex items-center gap-3 pl-4 border-l border-term-border">
+            <div className="flex items-center gap-2">
+              <div
+                className={clsx(
+                  'w-2 h-2 rounded-full',
+                  isRunning && !isPaused && 'status-dot-online',
+                  isPaused && 'status-dot-warning',
+                  !isRunning && 'status-dot-offline'
+                )}
+              />
+              <span
+                className={clsx(
+                  'text-xs font-medium tracking-wider',
+                  isRunning && !isPaused && 'text-matrix-green',
+                  isPaused && 'text-amber',
+                  !isRunning && 'text-hot-pink'
+                )}
+              >
+                {isPaused ? 'PAUSED' : isRunning ? 'RUNNING' : 'OFFLINE'}
+              </span>
+            </div>
             {state && (
-              <span className="text-xs text-slate-400">
-                Uptime: {formatUptime(state.status.uptime)}
+              <span className="text-term-dim text-xs font-mono">
+                UP:{formatUptime(state.status.uptime)}
               </span>
             )}
           </div>
         </div>
 
-        {/* Account Summary */}
-        <div className="flex items-center gap-6">
+        {/* Account Summary & Controls */}
+        <div className="flex items-center gap-4">
           {state && (
-            <>
+            <div className="flex items-center gap-6 text-sm font-mono">
+              {/* Balance */}
               <div className="text-right">
-                <div className="text-xs text-slate-400">Balance</div>
-                <div className="text-lg font-semibold text-white">
-                  {formatCurrency(state.account.balance)}
-                </div>
+                <span className="text-term-muted text-xs">BAL</span>
+                <div className="text-term-text">${formatCurrency(state.account.balance)}</div>
               </div>
+
+              {/* P&L */}
               <div className="text-right">
-                <div className="text-xs text-slate-400">Total P&L</div>
+                <span className="text-term-muted text-xs">P&L</span>
                 <div
                   className={clsx(
-                    'text-lg font-semibold',
-                    state.account.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    state.account.totalPnl >= 0 ? 'text-profit' : 'text-loss'
                   )}
                 >
-                  {state.account.totalPnl >= 0 ? '+' : ''}
-                  {formatCurrency(state.account.totalPnl)}
+                  {state.account.totalPnl >= 0 ? '+' : ''}${formatCurrency(state.account.totalPnl)}
                 </div>
               </div>
+
+              {/* Drawdown */}
               <div className="text-right">
-                <div className="text-xs text-slate-400">Drawdown</div>
+                <span className="text-term-muted text-xs">DD</span>
                 <div
                   className={clsx(
-                    'text-lg font-semibold',
-                    state.account.currentDrawdown > 0.05 ? 'text-red-400' : 'text-slate-300'
+                    'num-fixed',
+                    state.account.currentDrawdown > 0.05 ? 'text-hot-pink' : 'text-term-text'
                   )}
                 >
-                  {(state.account.currentDrawdown * 100).toFixed(1)}%
+                  {(state.account.currentDrawdown * 100).toFixed(2)}%
                 </div>
               </div>
-            </>
+            </div>
           )}
 
-          {/* Controls */}
-          <div className="flex items-center gap-3 ml-4 border-l border-slate-700 pl-4">
-            {/* WebSocket Connections */}
+          {/* Connection Status */}
+          <div className="flex items-center gap-3 px-3 border-l border-term-border">
             <div className="flex items-center gap-2">
-              {/* Dashboard WS */}
+              <span className="text-term-dim text-xs">WS:</span>
+              {/* Dashboard */}
               <div className="flex items-center gap-1" title="Dashboard WebSocket">
-                {isConnected ? (
-                  <Wifi className="h-3 w-3 text-emerald-400" />
-                ) : (
-                  <WifiOff className="h-3 w-3 text-red-400" />
-                )}
-                <span className={clsx('text-xs', isConnected ? 'text-emerald-400' : 'text-red-400')}>
-                  Dash
-                </span>
+                <div className={clsx('w-1.5 h-1.5 rounded-full', isConnected ? 'bg-matrix-green' : 'bg-hot-pink')} />
+                <span className={clsx('text-xs', isConnected ? 'text-matrix-green' : 'text-hot-pink')}>D</span>
               </div>
-
-              {/* Binance WS */}
+              {/* Binance */}
               {state && (
                 <div className="flex items-center gap-1" title="Binance WebSocket">
-                  {state.connections.binance ? (
-                    <Wifi className="h-3 w-3 text-emerald-400" />
-                  ) : (
-                    <WifiOff className="h-3 w-3 text-red-400" />
-                  )}
-                  <span className={clsx('text-xs', state.connections.binance ? 'text-emerald-400' : 'text-red-400')}>
-                    BN
-                  </span>
+                  <div className={clsx('w-1.5 h-1.5 rounded-full', state.connections.binance ? 'bg-matrix-green' : 'bg-hot-pink')} />
+                  <span className={clsx('text-xs', state.connections.binance ? 'text-matrix-green' : 'text-hot-pink')}>B</span>
                 </div>
               )}
-
-              {/* Polymarket WS */}
+              {/* Polymarket */}
               {state && (
                 <div className="flex items-center gap-1" title="Polymarket WebSocket">
-                  {state.connections.polymarket ? (
-                    <Wifi className="h-3 w-3 text-emerald-400" />
-                  ) : (
-                    <WifiOff className="h-3 w-3 text-red-400" />
-                  )}
-                  <span className={clsx('text-xs', state.connections.polymarket ? 'text-emerald-400' : 'text-red-400')}>
-                    PM
-                  </span>
+                  <div className={clsx('w-1.5 h-1.5 rounded-full', state.connections.polymarket ? 'bg-matrix-green' : 'bg-hot-pink')} />
+                  <span className={clsx('text-xs', state.connections.polymarket ? 'text-matrix-green' : 'text-hot-pink')}>P</span>
                 </div>
               )}
             </div>
-
-            {/* Pause/Resume Button */}
-            <button
-              onClick={isPaused ? onResume : onPause}
-              disabled={!isRunning}
-              className={clsx(
-                'flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium transition-colors',
-                isPaused
-                  ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
-                  : 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30',
-                !isRunning && 'opacity-50 cursor-not-allowed'
-              )}
-            >
-              {isPaused ? (
-                <>
-                  <Play className="h-4 w-4" /> Resume
-                </>
-              ) : (
-                <>
-                  <Pause className="h-4 w-4" /> Pause
-                </>
-              )}
-            </button>
           </div>
+
+          {/* Pause/Resume Button */}
+          <button
+            onClick={isPaused ? onResume : onPause}
+            disabled={!isRunning}
+            className={clsx(
+              'terminal-btn flex items-center gap-2',
+              isPaused ? 'border-matrix-green/50 text-matrix-green hover:border-matrix-green hover:bg-matrix-green/10' : 'terminal-btn-danger',
+              !isRunning && 'opacity-40 cursor-not-allowed'
+            )}
+          >
+            {isPaused ? (
+              <>
+                <Play className="h-3 w-3" />
+                <span>RESUME</span>
+              </>
+            ) : (
+              <>
+                <Pause className="h-3 w-3" />
+                <span>PAUSE</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
     </header>
