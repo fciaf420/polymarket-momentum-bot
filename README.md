@@ -28,7 +28,7 @@ This bot targets 15-minute "up or down" prediction markets on Polymarket for Bit
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/polymarket-momentum-bot.git
+git clone https://github.com/fciaf420/polymarket-momentum-bot.git
 cd polymarket-momentum-bot
 
 # Install dependencies
@@ -52,30 +52,78 @@ npm run build:all
 Create a `.env` file based on `.env.example`:
 
 ```env
-# Required: Your Ethereum private key (without 0x prefix)
-PRIVATE_KEY=your_private_key_here
+# ===========================================
+# REQUIRED: Wallet Configuration
+# ===========================================
+PRIVATE_KEY=your_private_key_here    # Without 0x prefix
 
-# Polymarket API
+# ===========================================
+# Polymarket API Configuration
+# ===========================================
 HOST=https://clob.polymarket.com
-CHAIN_ID=137
+CHAIN_ID=137                         # Polygon Mainnet
+WS_RTDS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
+WS_USER_URL=wss://ws-subscriptions-clob.polymarket.com/ws/user
 
-# Trading parameters
+# ===========================================
+# Trading Strategy Parameters
+# ===========================================
 POSITION_SIZE_PCT=0.02    # 2% of balance per trade
-GAP_THRESHOLD=0.03        # 3% gap required
+GAP_THRESHOLD=0.03        # 3% gap required to enter
 MOVE_THRESHOLD=0.02       # 2% price move required
 MAX_POSITIONS=3           # Max concurrent positions
-MAX_DRAWDOWN=0.10         # 10% max drawdown
+MIN_LIQUIDITY=1000        # Minimum $1000 liquidity
+MAX_HOLD_MINUTES=12       # Maximum hold time
+EXIT_GAP_THRESHOLD=0.01   # Exit when gap < 1%
 
-# Operation mode
+# ===========================================
+# Risk Management
+# ===========================================
+MAX_DRAWDOWN=0.10         # 10% max drawdown
+STOP_LOSS_PCT=0           # Per-trade stop loss (0 = disabled)
+
+# ===========================================
+# Volatility Detection (Bollinger Bands)
+# ===========================================
+BB_PERIOD=20              # Bollinger Bands period
+BB_STD_DEV=2              # Standard deviation multiplier
+VOLATILITY_SQUEEZE_THRESHOLD=0.005  # Low volatility threshold
+
+# ===========================================
+# Operation Mode
+# ===========================================
 BACKTEST=true             # Set to false for live trading
 DRY_RUN=true              # Set to false to execute real trades
+AUTO_APPROVE=false        # Auto-approve USDC spending
 
+# ===========================================
+# Logging
+# ===========================================
+LOG_LEVEL=info            # debug, info, warn, error
+TRADE_HISTORY_PATH=./trades.csv
+
+# ===========================================
+# Binance Fallback
+# ===========================================
+BINANCE_FALLBACK_ENABLED=true
+BINANCE_WS_URL=wss://stream.binance.com:9443/ws
+
+# ===========================================
+# Proxy (for geo-restricted regions)
+# ===========================================
+PROXY_URL=                # http://host:port or socks5://host:port
+
+# ===========================================
 # Dashboard
-DASHBOARD_ENABLED=true    # Enable real-time dashboard
-DASHBOARD_PORT=3001       # Dashboard server port
+# ===========================================
+DASHBOARD_ENABLED=true
+DASHBOARD_PORT=3001
 
+# ===========================================
 # Polymarket Wallet (optional)
-POLYMARKET_WALLET=        # Your Polymarket Safe/proxy wallet address (if different from EOA)
+# ===========================================
+# Use if trading via Polymarket proxy/Safe wallet
+POLYMARKET_WALLET=
 ```
 
 ## Usage
@@ -126,8 +174,13 @@ The bot includes a real-time web dashboard for monitoring trading activity.
   - Countdown timer until market expiry
   - Visual odds bar showing probability distribution
   - Active markets list with expiry times
+- **Move Progress**: Visual indicator showing price move percentage toward threshold
+- **Validation Chain**: Step-by-step signal validation visualization
+- **Trading Config**: Live display of current strategy parameters
+- **Config Banner**: Overview of active configuration (dry run, backtest mode, etc.)
 - **Trade History**: Paginated trade log with filters
 - **WebSocket Health**: Connection status for Dashboard, Binance, and Polymarket feeds
+- **Position Sync**: Automatic sync with on-chain positions every 10 seconds
 
 ### Accessing the Dashboard
 
@@ -169,11 +222,14 @@ src/
 ├── strategy.ts           # Core trading strategy logic
 ├── risk-manager.ts       # Position sizing and risk controls
 ├── backtest.ts           # Backtesting module
+├── test-trading.ts       # Trading validation test script
+├── test-btc-trade.ts     # BTC-specific trade testing
 ├── clients/
+│   ├── index.ts          # Client exports
 │   ├── binance-ws.ts     # Binance WebSocket for price feeds
 │   ├── polymarket-ws.ts  # Polymarket real-time data
 │   ├── clob-client.ts    # Polymarket CLOB trading client
-│   ├── usdc-approval.ts  # USDC contract approvals
+│   ├── usdc-approval.ts  # USDC & CTF contract approvals
 │   └── market-discovery.ts # Active market discovery
 ├── dashboard/
 │   ├── server.ts         # Express + WebSocket server
@@ -183,16 +239,31 @@ src/
 │   └── index.ts          # TypeScript type definitions
 └── utils/
     ├── logger.ts         # Winston logging
-    ├── volatility.ts     # Bollinger Bands & volatility
+    ├── volatility.ts     # Bollinger Bands & move progress
     ├── helpers.ts        # Utility functions
     └── csv.ts            # Trade history export
 
 dashboard/                # React frontend (Vite + Tailwind)
 ├── src/
-│   ├── components/       # React components
-│   ├── hooks/            # Custom hooks (useWebSocket)
-│   ├── services/         # API client
-│   └── types/            # TypeScript types
+│   ├── App.tsx           # Main application component
+│   ├── components/
+│   │   ├── AccountStats.tsx    # Balance and P&L display
+│   │   ├── ConfigBanner.tsx    # Configuration overview
+│   │   ├── Header.tsx          # Navigation and controls
+│   │   ├── LivePositions.tsx   # Open positions display
+│   │   ├── MoveProgress.tsx    # Price move percentage
+│   │   ├── PriceMonitor.tsx    # Live prices and odds
+│   │   ├── RecentSignals.tsx   # Signal feed
+│   │   ├── RiskMetrics.tsx     # Risk indicators
+│   │   ├── TradeHistory.tsx    # Trade log
+│   │   ├── TradingConfig.tsx   # Strategy parameters
+│   │   └── ValidationChain.tsx # Signal validation steps
+│   ├── hooks/
+│   │   └── useWebSocket.ts     # WebSocket connection hook
+│   ├── services/
+│   │   └── api.ts              # REST API client
+│   └── types/
+│       └── index.ts            # TypeScript types
 ├── vite.config.ts
 └── package.json
 ```
@@ -206,6 +277,9 @@ dashboard/                # React frontend (Vite + Tailwind)
 | `npm run build:all` | Build both backend and dashboard |
 | `npm start` | Run the bot (with dashboard) |
 | `npm run backtest` | Run backtesting |
+| `npm run test:trading` | Validate trading setup |
+| `npm run lint` | Run ESLint |
+| `npm run clean` | Remove dist folder |
 
 ## Architecture
 
@@ -232,6 +306,14 @@ dashboard/                # React frontend (Vite + Tailwind)
 - Market orders via Polymarket CLOB API
 - Order book liquidity checks before entry
 - Automatic position tracking and P&L calculation
+- On-chain position sync every 10 seconds for reliability
+- Signal cooldown (5s) to prevent duplicate executions
+
+### Wallet Support
+
+- **EOA Wallet**: Direct trading with your private key
+- **Proxy Wallet**: Support for Polymarket Safe/proxy wallets via `POLYMARKET_WALLET` env var
+- **Auto-Approval**: Automatic USDC and CTF exchange approvals when `AUTO_APPROVE=true`
 
 ## API Documentation
 
