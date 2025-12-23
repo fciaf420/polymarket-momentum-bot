@@ -106,6 +106,7 @@ export function useWebSocket(url: string = '/ws'): UseWebSocketReturn {
               currentDrawdown: update.account.drawdown,
             },
             validation: update.validation || prev.validation,
+            moveProgress: update.moveProgress || prev.moveProgress,
           };
         });
         break;

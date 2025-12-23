@@ -133,30 +133,27 @@ export function calculatePriceGap(
     const expectedUpPrice = Math.min(0.5 + absMove * 5, 0.95);
     const gap = expectedUpPrice - upImpliedProb;
 
-    // Return positive gap (let config.gapThreshold filter in strategy)
-    if (gap > 0) {
-      return {
-        gap,
-        direction: 'UP',
-        tokenSide: 'up', // Buy "Up" shares which are underpriced
-      };
-    }
+    // Return gap even if negative for debugging (strategy will filter)
+    return {
+      gap: Math.max(gap, 0), // Clamp to 0 if negative
+      direction: 'UP',
+      tokenSide: 'up',
+    };
   } else if (cryptoMovePercent < -moveThreshold) {
     // Crypto went down significantly - "Down" shares should be expensive
     // If "Down" is still cheap (near 0.5), there's a lag - buy DOWN shares
     const expectedDownPrice = Math.min(0.5 + absMove * 5, 0.95);
     const gap = expectedDownPrice - downImpliedProb;
 
-    // Return positive gap (let config.gapThreshold filter in strategy)
-    if (gap > 0) {
-      return {
-        gap,
-        direction: 'DOWN',
-        tokenSide: 'down', // Buy "Down" shares which are underpriced
-      };
-    }
+    // Return gap even if negative for debugging (strategy will filter)
+    return {
+      gap: Math.max(gap, 0), // Clamp to 0 if negative
+      direction: 'DOWN',
+      tokenSide: 'down',
+    };
   }
 
+  // Move not significant enough
   return { gap: 0, direction: 'UP', tokenSide: 'up' };
 }
 

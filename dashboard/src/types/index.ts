@@ -145,6 +145,17 @@ export interface AssetValidation {
   blockReason?: string;
 }
 
+export interface MoveProgress {
+  asset: CryptoAsset;
+  currentMovePercent: number;
+  direction: 'up' | 'down' | 'flat';
+  progress: number; // 0-1, where 1 = threshold hit
+  durationSeconds: number;
+  startPrice: number;
+  currentPrice: number;
+  threshold: number;
+}
+
 export interface DashboardState {
   status: {
     isRunning: boolean;
@@ -180,6 +191,7 @@ export interface DashboardState {
   };
   config: TradingConfig;
   validation: AssetValidation[];
+  moveProgress: MoveProgress[];
 }
 
 export interface WSMessage {
@@ -215,4 +227,5 @@ export interface PriceUpdate {
     drawdown: number;
   };
   validation: AssetValidation[];
+  moveProgress: MoveProgress[];
 }

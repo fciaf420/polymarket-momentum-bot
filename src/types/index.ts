@@ -194,6 +194,7 @@ export interface Order {
   filledSize: number;
   avgFillPrice: number;
   timestamp: number;
+  failureReason?: 'order_failed' | 'no_balance_tokens_resolved' | 'market_closed' | 'no_liquidity';
 }
 
 export type OrderStatus = 'pending' | 'open' | 'filled' | 'partial' | 'cancelled' | 'failed';

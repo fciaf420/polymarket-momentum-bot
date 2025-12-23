@@ -230,6 +230,60 @@ export function calculateRollingAverage(priceHistory: PricePoint[], periodSecond
 }
 
 /**
+ * Get current move progress toward threshold (for UI display)
+ * Returns current move percentage and progress toward threshold
+ */
+export function getMoveProgress(
+  priceHistory: PricePoint[],
+  asset: CryptoAsset,
+  moveThreshold: number = 0.003,
+  maxDurationSeconds: number = 60
+): {
+  asset: CryptoAsset;
+  currentMovePercent: number;
+  direction: 'up' | 'down' | 'flat';
+  progress: number; // 0-1, where 1 = threshold hit
+  durationSeconds: number;
+  startPrice: number;
+  currentPrice: number;
+} | null {
+  if (priceHistory.length < 2) {
+    return null;
+  }
+
+  // Use the most recent price's timestamp as "now"
+  const latestTimestamp = priceHistory[priceHistory.length - 1].timestamp;
+  const recentPrices = priceHistory.filter(p => latestTimestamp - p.timestamp <= maxDurationSeconds * 1000);
+
+  if (recentPrices.length < 2) {
+    return null;
+  }
+
+  // Get oldest and newest prices in the time window
+  const startPoint = recentPrices[0];
+  const endPoint = recentPrices[recentPrices.length - 1];
+
+  // Calculate percentage move
+  const movePercent = (endPoint.price - startPoint.price) / startPoint.price;
+  const absMovePercent = Math.abs(movePercent);
+
+  // Calculate progress toward threshold (capped at 1.0 for display)
+  const progress = Math.min(absMovePercent / moveThreshold, 1.0);
+
+  const durationSeconds = (endPoint.timestamp - startPoint.timestamp) / 1000;
+
+  return {
+    asset,
+    currentMovePercent: movePercent,
+    direction: movePercent > 0.0001 ? 'up' : movePercent < -0.0001 ? 'down' : 'flat',
+    progress,
+    durationSeconds,
+    startPrice: startPoint.price,
+    currentPrice: endPoint.price,
+  };
+}
+
+/**
  * Calculate momentum score based on price action
  * Returns a value between -1 (strong downward) and 1 (strong upward)
  */

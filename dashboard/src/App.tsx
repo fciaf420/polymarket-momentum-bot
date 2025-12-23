@@ -9,6 +9,7 @@ import {
   RiskMetrics,
   PriceMonitor,
   TradeHistory,
+  MoveProgress,
 } from './components';
 import { ConfigBanner } from './components/ConfigBanner';
 import { ValidationChain } from './components/ValidationChain';
@@ -79,6 +80,11 @@ function App() {
         {/* Validation Chain - Real-time signal checks */}
         <section className="mb-6">
           <ValidationChain validation={state.validation} />
+        </section>
+
+        {/* Move Progress - Shows progress toward hard move threshold */}
+        <section className="mb-6">
+          <MoveProgress moveProgress={state.moveProgress} />
         </section>
 
         {/* Main Grid */}

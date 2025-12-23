@@ -476,6 +476,90 @@ export class MarketDiscoveryClient {
   }
 
   /**
+   * Get market by token ID (for position sync)
+   * Uses CLOB API to look up market details for a given token
+   */
+  public async getMarketByTokenId(tokenId: string): Promise<CryptoMarket | undefined> {
+    // First check if it's already in our active markets
+    for (const market of this.activeMarkets.values()) {
+      if (market.upTokenId === tokenId || market.downTokenId === tokenId) {
+        return market;
+      }
+    }
+
+    // Otherwise fetch from CLOB API
+    try {
+      const response = await this.clobClient.get('/markets', {
+        params: { asset_id: tokenId },
+      });
+
+      if (!response.data || response.data.length === 0) {
+        return undefined;
+      }
+
+      const marketData = response.data[0];
+
+      // Determine asset from question/slug
+      let asset: CryptoAsset | undefined;
+      const question = (marketData.question || '').toLowerCase();
+      if (question.includes('bitcoin') || question.includes('btc')) asset = 'BTC';
+      else if (question.includes('ethereum') || question.includes('eth')) asset = 'ETH';
+      else if (question.includes('solana') || question.includes('sol')) asset = 'SOL';
+      else if (question.includes('xrp')) asset = 'XRP';
+
+      if (!asset) return undefined;
+
+      // Find the token info
+      const tokens = marketData.tokens || [];
+      const upToken = tokens.find((t: any) => t.outcome === 'Up' || t.outcome === 'Yes');
+      const downToken = tokens.find((t: any) => t.outcome === 'Down' || t.outcome === 'No');
+
+      if (!upToken || !downToken) return undefined;
+
+      const market: CryptoMarket = {
+        conditionId: marketData.condition_id || marketData.conditionId,
+        questionId: marketData.question_id || marketData.questionId || '',
+        tokens: [],
+        minIncentiveSize: '0',
+        maxIncentiveSize: '0',
+        active: marketData.active !== false,
+        closed: marketData.closed === true,
+        makerBase: 0,
+        takerBase: 0,
+        description: '',
+        endDate: marketData.end_date_iso || marketData.endDate || '',
+        question: marketData.question || '',
+        marketSlug: '',
+        fpmm: '',
+        category: '',
+        enableOrderBook: marketData.enable_order_book !== false,
+        asset,
+        direction: 'UP' as const,
+        expiryTime: new Date(marketData.end_date_iso || marketData.endDate),
+        upTokenId: upToken.token_id,
+        downTokenId: downToken.token_id,
+      };
+
+      // Cache it for future lookups
+      this.activeMarkets.set(market.conditionId, market);
+
+      logger.info('Fetched market by token ID', {
+        asset: market.asset,
+        tokenId: tokenId.substring(0, 20),
+        expiresIn: `${Math.round((market.expiryTime.getTime() - Date.now()) / 60000)}m`,
+      });
+
+      return market;
+    } catch (error) {
+      logger.debug('Failed to fetch market by token ID', {
+        tokenId: tokenId.substring(0, 20),
+        error: (error as Error).message,
+      });
+      return undefined;
+    }
+  }
+
+  /**
    * Get historical prices for a market token (for backtesting)
    */
   public async getHistoricalPrices(

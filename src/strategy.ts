@@ -25,7 +25,7 @@ import {
   PolymarketClobClient,
   MarketDiscoveryClient,
 } from './clients/index.js';
-import { detectHardMove } from './utils/volatility.js';
+import { detectHardMove, getMoveProgress } from './utils/volatility.js';
 import {
   calculatePriceGap,
   generateId,
@@ -72,6 +72,7 @@ export class MomentumLagStrategy extends EventEmitter {
   // Monitoring intervals
   private scanInterval: ReturnType<typeof setInterval> | null = null;
   private positionMonitorInterval: ReturnType<typeof setInterval> | null = null;
+  private positionSyncInterval: ReturnType<typeof setInterval> | null = null;
 
   // Validation chain tracking (for dashboard)
   private validationState: Map<CryptoAsset, AssetValidation> = new Map();
@@ -79,6 +80,10 @@ export class MomentumLagStrategy extends EventEmitter {
   // Execution tracking to prevent signal spam
   private pendingExecutions: Set<string> = new Set(); // conditionIds with in-flight orders
   private failedMarkets: Map<string, number> = new Map(); // conditionId -> cooldown until timestamp
+
+  // Signal cooldown to prevent duplicate signals for same opportunity
+  private lastSignal: Map<CryptoAsset, { direction: 'up' | 'down'; timestamp: number }> = new Map();
+  private readonly SIGNAL_COOLDOWN_MS = 5000; // 5 second cooldown per asset+direction
 
   constructor(config: Config) {
     super();
@@ -216,6 +221,11 @@ export class MomentumLagStrategy extends EventEmitter {
     if (this.positionMonitorInterval) {
       clearInterval(this.positionMonitorInterval);
       this.positionMonitorInterval = null;
+    }
+
+    if (this.positionSyncInterval) {
+      clearInterval(this.positionSyncInterval);
+      this.positionSyncInterval = null;
     }
 
     // Close all positions
@@ -396,10 +406,195 @@ export class MomentumLagStrategy extends EventEmitter {
    * Start position monitoring
    */
   private startPositionMonitoring(): void {
+    // Sync on-chain positions immediately on start
+    this.syncOnChainPositions();
+
     // Monitor positions every second
     this.positionMonitorInterval = setInterval(() => {
       this.monitorPositions();
     }, 1000);
+
+    // Sync on-chain positions every 10 seconds for reliability
+    this.positionSyncInterval = setInterval(() => {
+      this.syncOnChainPositions();
+    }, 10000);
+  }
+
+  /**
+   * Sync positions with on-chain state from CLOB API
+   * This ensures dashboard shows real positions even if bot restarts
+   */
+  private async syncOnChainPositions(): Promise<void> {
+    try {
+      const onChainPositions = await this.clobClient.getPositions();
+
+      if (onChainPositions.length === 0) {
+        // No on-chain positions - clear any stale internal tracking
+        if (this.state.positions.size > 0) {
+          logger.info('No on-chain positions found, clearing stale internal positions');
+          this.state.positions.clear();
+        }
+        return;
+      }
+
+      // Build a set of on-chain token IDs for quick lookup
+      const onChainTokenIds = new Set(onChainPositions.map(p => p.asset_id));
+
+      // Remove internal positions that no longer exist on-chain OR have expired markets
+      const now = Date.now();
+      for (const [conditionId, position] of this.state.positions) {
+        const tokenId = position.side === 'UP' ? position.market.upTokenId : position.market.downTokenId;
+
+        // Check if market has expired
+        const expiryTime = position.market.expiryTime instanceof Date
+          ? position.market.expiryTime.getTime()
+          : new Date(position.market.expiryTime).getTime();
+
+        if (expiryTime < now) {
+          logger.info('Removing position - market expired and resolved', {
+            asset: position.signal.asset,
+            conditionId: conditionId.substring(0, 16),
+            expiredMinutesAgo: ((now - expiryTime) / 60000).toFixed(1),
+          });
+          this.state.positions.delete(conditionId);
+          continue;
+        }
+
+        if (!onChainTokenIds.has(tokenId)) {
+          logger.info('Position no longer exists on-chain, removing from tracking', {
+            asset: position.signal.asset,
+            conditionId: conditionId.substring(0, 16),
+          });
+          this.state.positions.delete(conditionId);
+        }
+      }
+
+      // Check for orphaned on-chain positions not in our tracking
+      for (const onChainPos of onChainPositions) {
+        const size = parseFloat(onChainPos.size);
+        if (size <= 0) continue;
+
+        // Find which market this token belongs to
+        let foundInTracking = false;
+        for (const position of this.state.positions.values()) {
+          const tokenId = position.side === 'UP' ? position.market.upTokenId : position.market.downTokenId;
+          if (tokenId === onChainPos.asset_id) {
+            // Update size from on-chain data
+            position.size = size;
+            position.currentValue = position.currentPrice * size;
+            position.unrealizedPnl = position.currentValue - position.costBasis;
+            position.unrealizedPnlPercent = position.costBasis > 0 ? position.unrealizedPnl / position.costBasis : 0;
+            foundInTracking = true;
+            break;
+          }
+        }
+
+        if (!foundInTracking) {
+          // Orphaned position - find the market it belongs to
+          // First try active markets, then fetch from API
+          let market = Array.from(this.activeMarkets.values()).find(
+            m => m.upTokenId === onChainPos.asset_id || m.downTokenId === onChainPos.asset_id
+          );
+
+          // If not in active markets, fetch from API (handles markets with <2min left)
+          if (!market) {
+            market = await this.marketDiscovery.getMarketByTokenId(onChainPos.asset_id);
+          }
+
+          if (market) {
+              // Check if market has already expired - don't track resolved positions
+              const now = Date.now();
+              const expiryTime = market.expiryTime instanceof Date
+                ? market.expiryTime.getTime()
+                : new Date(market.expiryTime).getTime();
+
+              if (expiryTime < now) {
+                logger.debug('Skipping orphaned position - market already expired', {
+                  asset: market.asset,
+                  tokenId: onChainPos.asset_id.substring(0, 20),
+                  expiredMinutesAgo: ((now - expiryTime) / 60000).toFixed(1),
+                });
+                continue;
+              }
+
+              const side = market.upTokenId === onChainPos.asset_id ? 'UP' : 'DOWN';
+              const avgPrice = parseFloat(onChainPos.avg_entry_price) || 0.5;
+
+              logger.info('Found orphaned on-chain position, adding to tracking', {
+                asset: market.asset,
+                side,
+                size: size.toFixed(2),
+                avgPrice: avgPrice.toFixed(4),
+                tokenId: onChainPos.asset_id.substring(0, 20),
+              });
+
+              // Create a synthetic position for tracking
+              const position: Position = {
+                id: generateId(),
+                market,
+                signal: {
+                  id: 'orphan-' + generateId(),
+                  timestamp: Date.now(),
+                  asset: market.asset,
+                  market,
+                  priceMove: {
+                    asset: market.asset,
+                    movePercent: 0,
+                    direction: side === 'UP' ? 'up' : 'down',
+                    durationSeconds: 0,
+                    startPrice: 0,
+                    endPrice: 0,
+                    timestamp: Date.now(),
+                    volatilityBefore: {
+                      standardDeviation: 0,
+                      bollingerBandWidth: 0,
+                      upperBand: 0,
+                      lowerBand: 0,
+                      middleBand: 0,
+                      isSqueezing: false,
+                    },
+                  },
+                  gapPercent: 0,
+                  suggestedSide: side,
+                  tokenId: onChainPos.asset_id,
+                  entryPrice: avgPrice,
+                  liquidity: 0,
+                  confidence: 0,
+                  reason: 'Orphaned position from on-chain sync',
+                },
+                side,
+                tokenId: onChainPos.asset_id,
+                entryPrice: avgPrice,
+                currentPrice: avgPrice,
+                size,
+                costBasis: avgPrice * size,
+                currentValue: avgPrice * size,
+                unrealizedPnl: 0,
+                unrealizedPnlPercent: 0,
+                entryTimestamp: Date.now(),
+                status: 'open',
+              };
+
+              this.state.positions.set(market.conditionId, position);
+          } else {
+            // No matching market found (likely already settled)
+            logger.debug('On-chain position has no matching active market (likely expired)', {
+              tokenId: onChainPos.asset_id.substring(0, 20),
+              size: size.toFixed(2),
+              activeMarketCount: this.activeMarkets.size,
+            });
+          }
+        }
+      }
+
+      logger.debug('On-chain position sync complete', {
+        onChainCount: onChainPositions.length,
+        trackedCount: this.state.positions.size,
+      });
+
+    } catch (error) {
+      logger.warn('Failed to sync on-chain positions', { error: (error as Error).message });
+    }
   }
 
   /**
@@ -605,14 +800,31 @@ export class MomentumLagStrategy extends EventEmitter {
           const currentProb = move.direction === 'up' ? marketData.upImpliedProb : marketData.downImpliedProb;
           const rawGap = expectedPrice - currentProb;
 
-          logger.debug('Gap calc result', {
-            asset,
-            expectedPrice: (expectedPrice * 100).toFixed(1) + '%',
-            currentProb: (currentProb * 100).toFixed(1) + '%',
-            rawGap: (rawGap * 100).toFixed(1) + '%',
-            finalGap: (gapResult.gap * 100).toFixed(1) + '%',
-            threshold: (this.config.gapThreshold * 100).toFixed(1) + '%',
-          });
+          // Log at debug level when gap is 0 (too spammy at info)
+          if (gapResult.gap === 0) {
+            logger.debug('Gap is ZERO', {
+              asset,
+              movePercent: (move.movePercent * 100).toFixed(2) + '%',
+              moveDirection: move.direction,
+              moveThreshold: (this.config.moveThreshold * 100).toFixed(2) + '%',
+              moveExceedsThreshold: Math.abs(move.movePercent) > this.config.moveThreshold,
+              upImpliedProb: (marketData.upImpliedProb * 100).toFixed(1) + '%',
+              downImpliedProb: (marketData.downImpliedProb * 100).toFixed(1) + '%',
+              expectedPrice: (expectedPrice * 100).toFixed(1) + '%',
+              currentProb: (currentProb * 100).toFixed(1) + '%',
+              rawGap: (rawGap * 100).toFixed(1) + '%',
+              reason: rawGap <= 0 ? 'Market already at or above expected price' : 'Move below threshold',
+            });
+          } else {
+            logger.debug('Gap calc result', {
+              asset,
+              expectedPrice: (expectedPrice * 100).toFixed(1) + '%',
+              currentProb: (currentProb * 100).toFixed(1) + '%',
+              rawGap: (rawGap * 100).toFixed(1) + '%',
+              finalGap: (gapResult.gap * 100).toFixed(1) + '%',
+              threshold: (this.config.gapThreshold * 100).toFixed(1) + '%',
+            });
+          }
 
           if (gapResult.gap < this.config.gapThreshold) {
             checks.push({
@@ -652,6 +864,33 @@ export class MomentumLagStrategy extends EventEmitter {
                 threshold: formatCurrency(this.config.minLiquidity),
               });
 
+              // Check signal cooldown to prevent duplicate signals
+              const lastSig = this.lastSignal.get(asset);
+              const now = Date.now();
+              const signalDirection = move.direction;
+
+              if (lastSig) {
+                const timeSinceLastSignal = now - lastSig.timestamp;
+                const sameDirection = lastSig.direction === signalDirection;
+
+                // Skip if same direction and within cooldown period
+                if (sameDirection && timeSinceLastSignal < this.SIGNAL_COOLDOWN_MS) {
+                  checks.push({
+                    name: 'Signal Cooldown',
+                    status: 'failed',
+                    value: `${((this.SIGNAL_COOLDOWN_MS - timeSinceLastSignal) / 1000).toFixed(0)}s remaining`,
+                    threshold: `${this.SIGNAL_COOLDOWN_MS / 1000}s`,
+                    reason: 'Cooldown active for same direction',
+                  });
+                  blockReason = `Signal cooldown: ${signalDirection} signal fired ${(timeSinceLastSignal / 1000).toFixed(0)}s ago`;
+                  blocked = true;
+                  break; // Exit the market loop for this asset
+                }
+              }
+
+              // Update last signal tracker
+              this.lastSignal.set(asset, { direction: signalDirection, timestamp: now });
+
               // ALL CHECKS PASSED - Create and execute signal
               const confidence = this.calculateSignalConfidence(move, gapResult.gap, hadSqueeze, liquidity);
 
@@ -670,6 +909,13 @@ export class MomentumLagStrategy extends EventEmitter {
                 reason: `${asset} ${move.direction} ${formatPercent(Math.abs(move.movePercent))} in ${move.durationSeconds.toFixed(0)}s, gap ${formatPercent(gapResult.gap)}${hadSqueeze ? ' (post-squeeze)' : ''}`,
               };
 
+              // Add signal to state for dashboard tracking
+              this.state.signals.push(signal);
+              // Keep only last 100 signals
+              if (this.state.signals.length > 100) {
+                this.state.signals = this.state.signals.slice(-100);
+              }
+
               logSignal({
                 asset: signal.asset,
                 direction: signal.suggestedSide,
@@ -677,6 +923,9 @@ export class MomentumLagStrategy extends EventEmitter {
                 confidence: signal.confidence,
                 market: market.marketSlug,
               });
+
+              // Emit signal event for dashboard WebSocket
+              this.emit('signalDetected', signal);
 
               this.executeSignal(signal);
               signalTriggered = true;
@@ -908,11 +1157,18 @@ export class MomentumLagStrategy extends EventEmitter {
         });
       }
 
-      // 4. Market is about to expire (1 minute buffer)
+      // 4. Market approaching expiry - OVERRIDE any exit decision
+      // Let position resolve naturally (trying to sell with no liquidity is pointless)
       const timeToExpiry = position.market.expiryTime.getTime() - now;
-      if (timeToExpiry < 60 * 1000) {
-        shouldExit = true;
-        exitReason = 'market_resolved';
+      if (timeToExpiry < 60 * 1000 && timeToExpiry > 0) {
+        if (shouldExit) {
+          logger.info('Position approaching expiry, skipping sell - will let market resolve', {
+            asset: position.signal.asset,
+            timeToExpirySeconds: Math.floor(timeToExpiry / 1000),
+            originalExitReason: exitReason,
+          });
+          shouldExit = false; // Override - don't try to sell, let it resolve
+        }
       }
 
       if (shouldExit) {
@@ -943,6 +1199,37 @@ export class MomentumLagStrategy extends EventEmitter {
       );
 
       if (order.status === 'failed') {
+        // Check if failure is due to market resolution (tokens already redeemed)
+        if (order.failureReason === 'no_balance_tokens_resolved' ||
+            order.failureReason === 'market_closed') {
+          logger.info('Position resolved by market - tokens already redeemed', {
+            asset: position.signal.asset,
+            side: position.side,
+            conditionId: position.market.conditionId.substring(0, 16),
+          });
+
+          // Mark as resolved and remove from tracking
+          position.exitTimestamp = Date.now();
+          position.exitReason = 'market_resolved';
+          position.status = 'closed';
+          position.realizedPnl = 0; // Unknown until balance update
+
+          this.state.positions.delete(position.market.conditionId);
+          this.emit('positionClosed', position);
+          return;
+        }
+
+        // No liquidity near expiry - stop retrying, let market resolve naturally
+        if (order.failureReason === 'no_liquidity') {
+          logger.info('No liquidity to sell - will let market resolve', {
+            asset: position.signal.asset,
+            side: position.side,
+            size: position.size.toFixed(2),
+          });
+          position.status = 'open'; // Keep open but stop retrying
+          return;
+        }
+
         logger.error('Failed to close position', { positionId: position.id });
         position.status = 'open';
         return;
@@ -1134,6 +1421,61 @@ export class MomentumLagStrategy extends EventEmitter {
       binance: this.binanceClient.isConnected(),
       polymarket: this.polymarketWs.isConnected(),
     };
+  }
+
+  /**
+   * Get move progress for all assets (for dashboard progress bars)
+   */
+  public getMoveProgressAll(): Array<{
+    asset: CryptoAsset;
+    currentMovePercent: number;
+    direction: 'up' | 'down' | 'flat';
+    progress: number;
+    durationSeconds: number;
+    startPrice: number;
+    currentPrice: number;
+    threshold: number;
+  }> {
+    const result: Array<{
+      asset: CryptoAsset;
+      currentMovePercent: number;
+      direction: 'up' | 'down' | 'flat';
+      progress: number;
+      durationSeconds: number;
+      startPrice: number;
+      currentPrice: number;
+      threshold: number;
+    }> = [];
+
+    for (const [asset, priceData] of this.cryptoPrices) {
+      const progress = getMoveProgress(
+        priceData.priceHistory,
+        asset,
+        this.config.moveThreshold,
+        60 // 60 second window
+      );
+
+      if (progress) {
+        result.push({
+          ...progress,
+          threshold: this.config.moveThreshold,
+        });
+      } else {
+        // Return zero progress if no data
+        result.push({
+          asset,
+          currentMovePercent: 0,
+          direction: 'flat',
+          progress: 0,
+          durationSeconds: 0,
+          startPrice: priceData.price,
+          currentPrice: priceData.price,
+          threshold: this.config.moveThreshold,
+        });
+      }
+    }
+
+    return result;
   }
 
   /**

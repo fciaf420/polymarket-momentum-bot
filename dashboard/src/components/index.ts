@@ -5,3 +5,4 @@ export { RecentSignals } from './RecentSignals';
 export { RiskMetrics } from './RiskMetrics';
 export { PriceMonitor } from './PriceMonitor';
 export { TradeHistory } from './TradeHistory';
+export { MoveProgress } from './MoveProgress';

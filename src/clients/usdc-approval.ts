@@ -20,6 +20,8 @@ const POLYGON_CONTRACTS = {
   NEG_RISK_CTF_EXCHANGE: '0xC5d563A36AE78145C45a50134d48A1215220f80a',
   // Polymarket Neg Risk Adapter
   NEG_RISK_ADAPTER: '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296',
+  // CTF (Conditional Tokens Framework) - ERC1155 outcome tokens
+  CTF: '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045',
 };
 
 // Contract addresses on Amoy Testnet
@@ -29,6 +31,8 @@ const AMOY_CONTRACTS = {
   CTF_EXCHANGE: '0xdFE02Eb6733538f8Ea35D585af8DE5958AD99E40',
   NEG_RISK_CTF_EXCHANGE: '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296',
   NEG_RISK_ADAPTER: '0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9',
+  // CTF on Amoy (same as mainnet for testing purposes)
+  CTF: '0x69308FB512518e39F9b16112fA8d994F4e2Bf8bB',
 };
 
 // ERC20 ABI (only what we need)
@@ -38,6 +42,12 @@ const ERC20_ABI = [
   'function balanceOf(address account) view returns (uint256)',
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
+];
+
+// ERC1155 ABI (for CTF outcome tokens)
+const ERC1155_ABI = [
+  'function setApprovalForAll(address operator, bool approved)',
+  'function isApprovedForAll(address owner, address operator) view returns (bool)',
 ];
 
 export interface ApprovalStatus {
@@ -62,6 +72,7 @@ export class UsdcApprovalManager {
   private config: Config;
   private contracts: typeof POLYGON_CONTRACTS;
   private usdcContract: Contract | null = null;
+  private ctfContract: Contract | null = null;
   private decimals: number = 6;
   // Address to check balance for (may be different from signing wallet)
   private balanceCheckAddress: string;
@@ -100,6 +111,11 @@ export class UsdcApprovalManager {
       balanceWallet: this.balanceCheckAddress,
       usingProxyWallet: isUsingProxyWallet,
     });
+
+    // Initialize CTF contract for ERC1155 approvals (needed for selling)
+    // Must be done first before any early returns
+    this.ctfContract = new Contract(this.contracts.CTF, ERC1155_ABI, this.wallet);
+    logger.info('CTF contract initialized', { address: this.contracts.CTF });
 
     // Try USDC.e first (more commonly used on Polymarket)
     let usdcAddress = this.contracts.USDC_E;
@@ -142,6 +158,102 @@ export class UsdcApprovalManager {
       });
       this.usdcContract = new Contract(this.contracts.USDC_E, ERC20_ABI, this.wallet);
     }
+  }
+
+  /**
+   * Check if CTF tokens are approved for the CTF Exchange
+   * Required for selling outcome tokens
+   */
+  public async checkCTFApproval(): Promise<boolean> {
+    await this.ensureInitialized();
+
+    try {
+      const isApproved = await this.ctfContract!.isApprovedForAll(
+        this.balanceCheckAddress,
+        this.contracts.CTF_EXCHANGE
+      );
+      logger.debug('CTF approval status', { isApproved });
+      return isApproved;
+    } catch (error) {
+      logger.warn('Failed to check CTF approval', { error: (error as Error).message });
+      return false;
+    }
+  }
+
+  /**
+   * Approve CTF tokens for the CTF Exchange
+   * Required for selling outcome tokens
+   */
+  public async approveCTF(): Promise<ApprovalResult> {
+    await this.ensureInitialized();
+
+    logger.info('Approving CTF tokens for CTF Exchange', {
+      ctf: this.contracts.CTF,
+      exchange: this.contracts.CTF_EXCHANGE,
+    });
+
+    try {
+      // Estimate gas
+      const gasEstimate = await this.ctfContract!.setApprovalForAll.estimateGas(
+        this.contracts.CTF_EXCHANGE,
+        true
+      );
+
+      // Add 20% buffer
+      const gasLimit = (gasEstimate * 120n) / 100n;
+
+      // Get current gas price
+      const feeData = await this.provider.getFeeData();
+
+      // Send approval transaction
+      const tx = await this.ctfContract!.setApprovalForAll(
+        this.contracts.CTF_EXCHANGE,
+        true,
+        {
+          gasLimit,
+          maxFeePerGas: feeData.maxFeePerGas,
+          maxPriorityFeePerGas: feeData.maxPriorityFeePerGas,
+        }
+      );
+
+      logger.info('CTF approval transaction sent', { txHash: tx.hash });
+
+      // Wait for confirmation
+      const receipt = await tx.wait();
+
+      if (receipt.status === 1) {
+        logger.info('CTF approval confirmed', {
+          txHash: tx.hash,
+          blockNumber: receipt.blockNumber,
+          gasUsed: receipt.gasUsed.toString(),
+        });
+        return { success: true, txHash: tx.hash };
+      } else {
+        return { success: false, error: 'Transaction reverted' };
+      }
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      logger.error('CTF approval failed', { error: errorMessage });
+      return { success: false, error: errorMessage };
+    }
+  }
+
+  /**
+   * Ensure CTF tokens are approved for selling
+   * Checks approval status and approves if needed
+   */
+  public async ensureCTFApproval(): Promise<boolean> {
+    const isApproved = await this.checkCTFApproval();
+
+    if (isApproved) {
+      logger.debug('CTF tokens already approved for CTF Exchange');
+      return true;
+    }
+
+    logger.info('CTF tokens not approved, setting approval...');
+    const result = await this.approveCTF();
+
+    return result.success;
   }
 
   /**
@@ -407,30 +519,54 @@ export async function checkAndApproveUsdc(
     }
   }
 
-  if (allApproved) {
-    logger.info('All USDC approvals are in place');
+  // Check CTF (ERC1155) approval for selling outcome tokens
+  const ctfApproved = await manager.checkCTFApproval();
+  if (ctfApproved) {
+    logger.info('CTF tokens: Approved for CTF Exchange');
+  } else {
+    logger.warn('CTF tokens: Not approved for CTF Exchange (required for selling)');
+  }
+
+  if (allApproved && ctfApproved) {
+    logger.info('All approvals are in place');
     return { approved: true, balance: usdcBalance };
   }
 
   // Need to approve
   if (!autoApprove) {
-    logger.info('USDC approvals needed. Run with --auto-approve or set AUTO_APPROVE=true in .env');
+    logger.info('Approvals needed. Run with --auto-approve or set AUTO_APPROVE=true in .env');
     return { approved: false, balance: usdcBalance };
   }
 
-  // Auto-approve
-  logger.info('Auto-approving USDC for Polymarket contracts...');
-  const { success, results } = await manager.approveAll();
+  // Auto-approve USDC
+  let allSuccess = true;
+  if (!allApproved) {
+    logger.info('Auto-approving USDC for Polymarket contracts...');
+    const { results } = await manager.approveAll();
 
-  for (const { name, result } of results) {
-    if (result.success) {
-      logger.info(`${name}: Approval successful`, { txHash: result.txHash });
-    } else {
-      logger.error(`${name}: Approval failed`, { error: result.error });
+    for (const { name, result } of results) {
+      if (result.success) {
+        logger.info(`${name}: Approval successful`, { txHash: result.txHash });
+      } else {
+        logger.error(`${name}: Approval failed`, { error: result.error });
+        allSuccess = false;
+      }
     }
   }
 
-  return { approved: success, balance: usdcBalance };
+  // Auto-approve CTF tokens
+  if (!ctfApproved) {
+    logger.info('Auto-approving CTF tokens for CTF Exchange...');
+    const ctfResult = await manager.approveCTF();
+    if (ctfResult.success) {
+      logger.info('CTF tokens: Approval successful', { txHash: ctfResult.txHash });
+    } else {
+      logger.error('CTF tokens: Approval failed', { error: ctfResult.error });
+      allSuccess = false;
+    }
+  }
+
+  return { approved: allSuccess, balance: usdcBalance };
 }
 
 export default UsdcApprovalManager;

@@ -11,10 +11,70 @@ import type {
   Signal,
   CryptoAsset,
   MarketPriceData,
-  CryptoMarket,
   TradeRecord,
   AssetValidation,
 } from '../types/index.js';
+
+// Frontend-compatible market type (simplified from backend CryptoMarket)
+export interface FrontendMarket {
+  conditionId: string;
+  asset: CryptoAsset;
+  direction: 'UP' | 'DOWN';
+  expiryTime: string;
+  upTokenId: string;
+  downTokenId: string;
+  question: string;
+  endDate: string;
+}
+
+// Frontend-compatible position type
+export interface FrontendPosition {
+  id: string;
+  signal: {
+    asset: CryptoAsset;
+    direction: string;
+    gap: number;
+    confidence: number;
+  };
+  side: 'YES' | 'NO';
+  entryPrice: number;
+  currentPrice: number;
+  size: number;
+  costBasis: number;
+  currentValue: number;
+  unrealizedPnl: number;
+  unrealizedPnlPercent: number;
+  entryTime: number;
+  exitPrice?: number;
+  realizedPnl?: number;
+  exitReason?: string;
+}
+
+// Frontend-compatible signal type
+export interface FrontendSignal {
+  id: string;
+  asset: CryptoAsset;
+  direction: string;
+  gap: number;
+  cryptoPrice: number;
+  impliedPrice: number;
+  confidence: number;
+  timestamp: number;
+  executed: boolean;
+  executionReason?: string;
+}
+
+// Move progress for dashboard progress bars
+export interface MoveProgress {
+  asset: CryptoAsset;
+  currentMovePercent: number;
+  direction: 'up' | 'down' | 'flat';
+  progress: number; // 0-1, where 1 = threshold hit
+  durationSeconds: number;
+  startPrice: number;
+  currentPrice: number;
+  threshold: number;
+}
 
 export interface DashboardState {
   status: {
@@ -35,13 +95,13 @@ export interface DashboardState {
     currentDrawdown: number;
     totalPnl: number;
   };
-  positions: Position[];
-  signals: Signal[];
+  positions: FrontendPosition[];
+  signals: FrontendSignal[];
   prices: {
     crypto: Record<CryptoAsset, { price: number; timestamp: number }>;
     markets: Record<string, MarketPriceData>;
   };
-  markets: CryptoMarket[];
+  markets: FrontendMarket[];
   risk: {
     metrics: {
       currentDrawdown: number;
@@ -87,6 +147,7 @@ export interface DashboardState {
     dryRun: boolean;
   };
   validation: AssetValidation[];
+  moveProgress: MoveProgress[];
 }
 
 export class DashboardStateAggregator {
@@ -107,12 +168,57 @@ export class DashboardStateAggregator {
   }
 
   /**
+   * Transform backend Signal to frontend format
+   */
+  private transformSignal(signal: Signal): any {
+    return {
+      id: signal.id,
+      asset: signal.asset,
+      direction: signal.suggestedSide?.toLowerCase() || signal.priceMove?.direction || 'up',
+      gap: signal.gapPercent || 0,
+      cryptoPrice: signal.priceMove?.endPrice || 0,
+      impliedPrice: signal.entryPrice || 0,
+      confidence: signal.confidence || 0,
+      timestamp: signal.timestamp || Date.now(),
+      executed: true,
+      executionReason: signal.reason,
+    };
+  }
+
+  /**
+   * Transform backend Position to frontend format
+   */
+  private transformPosition(position: Position): any {
+    return {
+      id: position.id,
+      signal: {
+        asset: position.signal?.asset || position.market?.asset || 'BTC',
+        direction: position.signal?.suggestedSide?.toLowerCase() || position.signal?.priceMove?.direction || 'up',
+        gap: position.signal?.gapPercent || 0,
+        confidence: position.signal?.confidence || 0,
+      },
+      side: position.side === 'UP' ? 'YES' : position.side === 'DOWN' ? 'NO' : position.side,
+      entryPrice: position.entryPrice || 0,
+      currentPrice: position.currentPrice || position.entryPrice || 0,
+      size: position.size || 0,
+      costBasis: position.costBasis || 0,
+      currentValue: position.currentValue || position.costBasis || 0,
+      unrealizedPnl: position.unrealizedPnl || 0,
+      unrealizedPnlPercent: position.unrealizedPnlPercent || 0,
+      entryTime: position.entryTimestamp || Date.now(),
+      exitPrice: position.exitPrice,
+      realizedPnl: position.realizedPnl,
+      exitReason: position.exitReason,
+    };
+  }
+
+  /**
    * Get full dashboard state
    */
   public getState(): DashboardState {
     const strategyState = this.strategy.getState();
-    const positions = this.strategy.getPositions();
-    const signals = this.strategy.getSignals(50);
+    const rawPositions = this.strategy.getPositions();
+    const rawSignals = this.strategy.getSignals(50);
     const cryptoPrices = this.strategy.getCryptoPrices();
     const marketPrices = this.strategy.getMarketPrices();
     const markets = this.strategy.getActiveMarkets();
@@ -121,8 +227,12 @@ export class DashboardStateAggregator {
     const tradeSummary = this.strategy.getTradeHistoryWriter().getSummary();
     const wsHealth = this.strategy.getWebSocketHealth();
 
+    // Transform positions and signals to frontend format
+    const positions = rawPositions.map(p => this.transformPosition(p));
+    const signals = rawSignals.map(s => this.transformSignal(s));
+
     // Calculate total position value
-    const totalPositionValue = positions.reduce((sum, p) => sum + p.currentValue, 0);
+    const totalPositionValue = rawPositions.reduce((sum, p) => sum + p.currentValue, 0);
 
     // Convert crypto prices to simple format
     const cryptoPricesSimple: Record<CryptoAsset, { price: number; timestamp: number }> = {} as Record<CryptoAsset, { price: number; timestamp: number }>;
@@ -161,7 +271,17 @@ export class DashboardStateAggregator {
         crypto: cryptoPricesSimple,
         markets: marketPricesObj,
       },
-      markets,
+      // Transform markets to ensure Date objects are serialized as strings
+      markets: markets.map(m => ({
+        conditionId: m.conditionId,
+        asset: m.asset,
+        direction: 'UP' as const,
+        expiryTime: m.expiryTime instanceof Date ? m.expiryTime.toISOString() : String(m.expiryTime),
+        upTokenId: m.upTokenId,
+        downTokenId: m.downTokenId,
+        question: m.question || `${m.asset} Up or Down`,
+        endDate: m.expiryTime instanceof Date ? m.expiryTime.toISOString() : String(m.expiryTime),
+      })),
       risk: {
         metrics: {
           currentDrawdown: riskMetrics.currentDrawdown,
@@ -197,6 +317,7 @@ export class DashboardStateAggregator {
         dryRun: this.config.dryRun,
       },
       validation: this.strategy.getValidationState(),
+      moveProgress: this.strategy.getMoveProgressAll(),
     };
   }
 

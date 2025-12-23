@@ -6,9 +6,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { Wallet, ethers, Contract } from 'ethers';
+import axios from 'axios';
 import type { Config, Order, CryptoMarket } from '../types/index.js';
 import logger from '../utils/logger.js';
 import { retryWithBackoff, generateId } from '../utils/helpers.js';
+import { UsdcApprovalManager } from './usdc-approval.js';
+
+// CLOB API base URL
+const CLOB_API = 'https://clob.polymarket.com';
 
 // ERC20 ABI for balance checking
 const ERC20_BALANCE_ABI = ['function balanceOf(address account) view returns (uint256)'];
@@ -59,6 +64,8 @@ export class PolymarketClobClient {
   private apiCreds: ApiKeyCreds | null = null;
   private isInitialized: boolean = false;
   private dryRun: boolean;
+  private approvalManager: UsdcApprovalManager | null = null;
+  private ctfApprovalChecked: boolean = false;
 
   // Simulated balance for dry run mode
   private simulatedBalance: number = 10000;
@@ -107,18 +114,37 @@ export class PolymarketClobClient {
       // Wrap wallet for ethers v5 compatibility
       const wrappedWallet = wrapWalletForClobClient(this.wallet);
 
+      // Signature type: 0 = EOA, 1 = POLY_PROXY (Magic Link), 2 = GNOSIS_SAFE (Polymarket proxy)
+      // If using a proxy wallet, use signatureType 2
+      const signatureType = this.config.polymarketWallet ? 2 : 0;
+
+      // Funder address: use proxy wallet if provided, otherwise EOA
+      const funder = this.config.polymarketWallet || this.wallet.address;
+
+      logger.info('CLOB client config', {
+        signatureType,
+        funder,
+        hasProxyWallet: !!this.config.polymarketWallet,
+      });
+
       if (this.apiCreds) {
         this.client = new ClobClient(
           this.config.host,
           chain,
           wrappedWallet,
-          this.apiCreds
+          this.apiCreds,
+          signatureType,
+          funder
         );
       } else {
+        // First create client to derive API credentials
         this.client = new ClobClient(
           this.config.host,
           chain,
-          wrappedWallet
+          wrappedWallet,
+          undefined, // no creds yet
+          signatureType,
+          funder
         );
 
         // Derive API credentials
@@ -131,7 +157,9 @@ export class PolymarketClobClient {
             this.config.host,
             chain,
             wrappedWallet,
-            this.apiCreds
+            this.apiCreds,
+            signatureType,
+            funder
           );
           logger.info('CLOB client recreated with API credentials');
         } catch (error) {
@@ -196,7 +224,8 @@ export class PolymarketClobClient {
   }
 
   /**
-   * Get open positions
+   * Get open positions from Polymarket Data API
+   * Uses the data-api endpoint which provides user position data
    */
   public async getPositions(): Promise<Array<{ asset_id: string; size: string; avg_entry_price: string }>> {
     if (this.dryRun) {
@@ -209,20 +238,124 @@ export class PolymarketClobClient {
 
     await this.ensureInitialized();
 
-    try {
-      const positions = await retryWithBackoff(
-        () => this.client.getPositions() as Promise<any[]>,
-        { maxRetries: 3 }
-      );
+    // Use the proxy wallet if configured, otherwise EOA
+    const walletAddress = this.config.polymarketWallet || this.wallet.address;
 
-      return (positions || []).map((p: any) => ({
-        asset_id: p.asset_id,
-        size: p.size,
-        avg_entry_price: p.avg_entry_price,
+    try {
+      // Fetch positions from Polymarket Data API
+      logger.debug('Fetching positions from Data API', { wallet: walletAddress });
+
+      const response = await axios.get('https://data-api.polymarket.com/positions', {
+        params: {
+          user: walletAddress.toLowerCase(),
+          sizeThreshold: 0, // Include all positions
+        },
+        timeout: 10000,
+      });
+
+      const rawPositions = response.data || [];
+
+      logger.debug('Raw positions response', {
+        count: rawPositions.length,
+        sample: rawPositions.length > 0 ? JSON.stringify(rawPositions[0]).substring(0, 200) : 'empty',
+      });
+
+      // Filter out resolved positions (currentValue === 0, curPrice === 0)
+      const activePositions = rawPositions.filter((p: any) => {
+        const currentValue = parseFloat(p.currentValue || '0');
+        const curPrice = parseFloat(p.curPrice || '0');
+        const size = parseFloat(p.size || '0');
+        // Only include positions with value (active markets)
+        return size > 0 && (currentValue > 0 || curPrice > 0);
+      });
+
+      const positions = activePositions.map((p: any) => ({
+        asset_id: p.asset || p.token_id || p.assetId || p.tokenId,
+        size: String(p.size || p.amount || p.shares || 0),
+        avg_entry_price: String(p.avgPrice || p.avg_price || p.averagePrice || p.price || 0.5),
       }));
+
+      logger.info('Positions from Data API', {
+        wallet: walletAddress.substring(0, 10) + '...',
+        rawCount: rawPositions.length,
+        activeCount: positions.length,
+        expiredCount: rawPositions.length - positions.length,
+      });
+
+      return positions;
+
     } catch (error) {
-      logger.error('Failed to get positions', { error: (error as Error).message });
+      logger.warn('Failed to get positions from Data API', {
+        error: (error as Error).message,
+        wallet: walletAddress.substring(0, 10) + '...',
+      });
       return [];
+    }
+  }
+
+  /**
+   * Fetch tick size for a token from CLOB API
+   * The tick size determines minimum price increments
+   */
+  private async getTickSize(tokenId: string): Promise<number> {
+    try {
+      const response = await axios.get(`${CLOB_API}/tick-size`, {
+        params: { token_id: tokenId },
+        timeout: 10000,
+      });
+      const tickSize = response.data?.minimum_tick_size || 0.01;
+      logger.debug('Fetched tick size', { tokenId: tokenId.substring(0, 20), tickSize });
+      return tickSize;
+    } catch (error) {
+      logger.warn('Failed to fetch tick size, using default 0.01', {
+        error: (error as Error).message,
+      });
+      return 0.01; // Default tick size
+    }
+  }
+
+  /**
+   * Check if a market uses neg risk (for CTF exchange)
+   * The 15-minute crypto markets do NOT use neg risk
+   */
+  private isNegRiskMarket(_market: CryptoMarket): boolean {
+    // 15-minute crypto up/down markets use standard CTF, not neg risk
+    return false;
+  }
+
+  /**
+   * Ensure CTF tokens are approved for selling
+   * Only checks once per session to avoid repeated on-chain calls
+   */
+  private async ensureCTFApproval(): Promise<boolean> {
+    if (this.dryRun) {
+      return true;
+    }
+
+    // Only check once per session
+    if (this.ctfApprovalChecked) {
+      return true;
+    }
+
+    try {
+      if (!this.approvalManager) {
+        this.approvalManager = new UsdcApprovalManager(this.config);
+        await this.approvalManager.initialize();
+      }
+
+      const approved = await this.approvalManager.ensureCTFApproval();
+      this.ctfApprovalChecked = approved;
+
+      if (approved) {
+        logger.info('CTF tokens approved for selling');
+      } else {
+        logger.error('Failed to approve CTF tokens - selling may fail');
+      }
+
+      return approved;
+    } catch (error) {
+      logger.error('Error ensuring CTF approval', { error: (error as Error).message });
+      return false;
     }
   }
 
@@ -288,15 +421,32 @@ export class PolymarketClobClient {
         throw new Error('Unable to calculate order size');
       }
 
-      // Create and post order
-      const orderArgs = {
-        tokenId,
-        price: parseFloat(sortedAsks[0].price),
+      // Fetch tick size and neg risk config for the market
+      const tickSize = await this.getTickSize(tokenId);
+      const negRisk = this.isNegRiskMarket(market);
+
+      // Round price to tick size
+      const rawPrice = parseFloat(sortedAsks[0].price);
+      const roundedPrice = Math.round(rawPrice / tickSize) * tickSize;
+
+      logger.debug('Creating order with market config', {
+        tickSize,
+        negRisk,
+        rawPrice,
+        roundedPrice,
         size: totalShares,
-        side: 'BUY',
+      });
+
+      // Create and post order with full market config
+      const orderArgs = {
+        tokenID: tokenId,  // Library uses tokenID not tokenId
+        price: roundedPrice,
+        size: totalShares,
+        side: 'BUY' as const,
       };
 
-      const signedOrder = await this.client.createOrder(orderArgs);
+      // Use createOrder with proper tick size
+      const signedOrder = await this.client.createOrder(orderArgs, { tickSize, negRisk });
       const result = await this.client.postOrder(signedOrder);
 
       if (!result?.success) {
@@ -358,6 +508,9 @@ export class PolymarketClobClient {
 
     await this.ensureInitialized();
 
+    // Ensure CTF tokens are approved for selling (one-time check per session)
+    await this.ensureCTFApproval();
+
     try {
       const orderBook = await this.client.getOrderBook(tokenId);
       if (!orderBook?.bids || orderBook.bids.length === 0) {
@@ -370,14 +523,29 @@ export class PolymarketClobClient {
 
       const bestBid = parseFloat(sortedBids[0].price);
 
-      const orderArgs = {
-        tokenId,
-        price: bestBid,
+      // Fetch tick size and neg risk config for the market
+      const tickSize = await this.getTickSize(tokenId);
+      const negRisk = this.isNegRiskMarket(market);
+
+      // Round price to tick size
+      const roundedPrice = Math.round(bestBid / tickSize) * tickSize;
+
+      logger.debug('Creating sell order with market config', {
+        tickSize,
+        negRisk,
+        rawPrice: bestBid,
+        roundedPrice,
         size,
-        side: 'SELL',
+      });
+
+      const orderArgs = {
+        tokenID: tokenId,  // Library uses tokenID not tokenId
+        price: roundedPrice,
+        size,
+        side: 'SELL' as const,
       };
 
-      const signedOrder = await this.client.createOrder(orderArgs);
+      const signedOrder = await this.client.createOrder(orderArgs, { tickSize, negRisk });
       const result = await this.client.postOrder(signedOrder);
 
       if (!result?.success) {
@@ -398,7 +566,45 @@ export class PolymarketClobClient {
       };
 
     } catch (error) {
-      logger.error('Market sell order failed', { error: (error as Error).message });
+      const errorMessage = (error as Error).message || 'Unknown error';
+
+      // Check for specific error types
+      const isBalanceError = errorMessage.includes('not enough balance') ||
+                             errorMessage.includes('allowance');
+      const isMarketClosed = errorMessage.includes('market is closed') ||
+                             errorMessage.includes('trading is disabled');
+      const isNoLiquidity = errorMessage.includes('No bids available') ||
+                            errorMessage.includes('no liquidity');
+
+      // Determine the failure reason
+      let failureReason: 'order_failed' | 'no_balance_tokens_resolved' | 'market_closed' | 'no_liquidity' = 'order_failed';
+      if (isBalanceError) {
+        failureReason = 'no_balance_tokens_resolved';
+        logger.warn('Sell failed - tokens likely resolved/redeemed', {
+          market: market.marketSlug,
+          tokenId: tokenId.substring(0, 20),
+          error: errorMessage,
+        });
+      } else if (isMarketClosed) {
+        failureReason = 'market_closed';
+        logger.warn('Sell failed - market is closed', {
+          market: market.marketSlug,
+          error: errorMessage,
+        });
+      } else if (isNoLiquidity) {
+        failureReason = 'no_liquidity';
+        logger.warn('Sell failed - no bids in order book, will let market resolve', {
+          market: market.marketSlug,
+          tokenId: tokenId.substring(0, 20),
+        });
+      } else {
+        logger.error('Market sell order failed', {
+          market: market.marketSlug,
+          tokenId: tokenId.substring(0, 20),
+          size,
+          error: errorMessage,
+        });
+      }
 
       return {
         id: orderId,
@@ -408,6 +614,7 @@ export class PolymarketClobClient {
         type: 'market',
         size,
         status: 'failed',
+        failureReason,
         filledSize: 0,
         avgFillPrice: 0,
         timestamp: Date.now(),

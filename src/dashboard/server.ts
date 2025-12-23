@@ -297,17 +297,68 @@ export class DashboardServer {
    */
   private setupStrategyListeners(): void {
     this.strategy.on('positionOpened', (position) => {
-      this.broadcast({ type: 'position_opened', data: position, timestamp: Date.now() });
+      // Transform position to frontend format
+      const frontendPosition = this.transformPosition(position);
+      this.broadcast({ type: 'position_opened', data: frontendPosition, timestamp: Date.now() });
     });
 
     this.strategy.on('positionClosed', (position) => {
-      this.broadcast({ type: 'position_closed', data: position, timestamp: Date.now() });
+      // Transform position to frontend format
+      const frontendPosition = this.transformPosition(position);
+      this.broadcast({ type: 'position_closed', data: frontendPosition, timestamp: Date.now() });
     });
 
     // Listen for signal events (if strategy emits them)
     this.strategy.on('signalDetected', (signal) => {
-      this.broadcast({ type: 'signal_detected', data: signal, timestamp: Date.now() });
+      // Transform signal to frontend format
+      const frontendSignal = this.transformSignal(signal);
+      this.broadcast({ type: 'signal_detected', data: frontendSignal, timestamp: Date.now() });
     });
+  }
+
+  /**
+   * Transform backend Signal to frontend Signal format
+   */
+  private transformSignal(signal: any): any {
+    return {
+      id: signal.id,
+      asset: signal.asset,
+      direction: signal.suggestedSide?.toLowerCase() || signal.priceMove?.direction || 'up',
+      gap: signal.gapPercent || 0,
+      cryptoPrice: signal.priceMove?.endPrice || 0,
+      impliedPrice: signal.entryPrice || 0,
+      confidence: signal.confidence || 0,
+      timestamp: signal.timestamp || Date.now(),
+      executed: true, // If we're emitting signalDetected, it's being executed
+      executionReason: signal.reason,
+    };
+  }
+
+  /**
+   * Transform backend Position to frontend Position format
+   */
+  private transformPosition(position: any): any {
+    return {
+      id: position.id,
+      signal: {
+        asset: position.signal?.asset || position.market?.asset || 'BTC',
+        direction: position.signal?.suggestedSide?.toLowerCase() || position.signal?.priceMove?.direction || 'up',
+        gap: position.signal?.gapPercent || 0,
+        confidence: position.signal?.confidence || 0,
+      },
+      side: position.side === 'UP' ? 'YES' : position.side === 'DOWN' ? 'NO' : position.side,
+      entryPrice: position.entryPrice || 0,
+      currentPrice: position.currentPrice || position.entryPrice || 0,
+      size: position.size || 0,
+      costBasis: position.costBasis || 0,
+      currentValue: position.currentValue || position.costBasis || 0,
+      unrealizedPnl: position.unrealizedPnl || 0,
+      unrealizedPnlPercent: position.unrealizedPnlPercent || 0,
+      entryTime: position.entryTimestamp || position.entryTime || Date.now(),
+      exitPrice: position.exitPrice,
+      realizedPnl: position.realizedPnl,
+      exitReason: position.exitReason,
+    };
   }
 
   /**
@@ -339,6 +390,7 @@ export class DashboardServer {
             drawdown: state.account.currentDrawdown,
           },
           validation: state.validation,
+          moveProgress: state.moveProgress,
         },
         timestamp: Date.now(),
       });
