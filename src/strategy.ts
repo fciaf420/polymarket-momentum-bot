@@ -87,7 +87,7 @@ export class MomentumLagStrategy extends EventEmitter {
 
   // Recently closed positions - prevent re-adding as orphans during Data API sync lag
   private recentlyClosedPositions: Map<string, number> = new Map(); // conditionId -> closed timestamp
-  private readonly POSITION_COOLDOWN_MS = 30000; // 30 second cooldown after close
+  private readonly POSITION_COOLDOWN_MS = 120000; // 120 second cooldown after close (Data API can lag)
 
   // Signal cooldown to prevent duplicate signals for same opportunity
   private lastSignal: Map<CryptoAsset, { direction: 'up' | 'down'; timestamp: number }> = new Map();
@@ -699,6 +699,12 @@ export class MomentumLagStrategy extends EventEmitter {
               };
 
               this.state.positions.set(market.conditionId, position);
+              logger.info('Orphan position added to tracking', {
+                asset: market.asset,
+                side,
+                size: size.toFixed(2),
+                positionCount: this.state.positions.size,
+              });
           } else {
             // No matching market found (likely already settled)
             logger.debug('On-chain position has no matching active market (likely expired)', {
@@ -1518,6 +1524,13 @@ export class MomentumLagStrategy extends EventEmitter {
 
       // Remove from active positions
       this.state.positions.delete(position.market.conditionId);
+
+      logger.info('Position removed from tracking after sell', {
+        asset: position.signal.asset,
+        side: position.side,
+        conditionId: position.market.conditionId.substring(0, 16),
+        remainingPositions: this.state.positions.size,
+      });
 
       // Track this position as recently closed to prevent orphan re-add spam
       this.recentlyClosedPositions.set(position.market.conditionId, Date.now());
